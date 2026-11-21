@@ -463,6 +463,10 @@ pub(crate) fn parse_shader_definition(source: &str) -> Result<ShaderDefinition> 
     Ok(shader)
 }
 
+pub fn shader_asset_name(source: &str) -> Result<String> {
+    parse_shader_definition(source).map(|shader| shader.name)
+}
+
 pub(super) fn unquote(value: String) -> String {
     let mut chars = value[1..value.len() - 1].chars();
     let mut decoded = String::new();

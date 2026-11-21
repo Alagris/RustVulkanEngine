@@ -35,21 +35,21 @@ Compile shaders without opening a window:
 cargo run -p game -- --compile-shaders
 ```
 
-Select another pipeline with
-`cargo run -p game -- --pipeline path\to\pipeline.pipe`. Compiled SPIR-V is
+Choose another project configuration with
+`cargo run -p game -- --settings path\to\settings.toml`. Compiled SPIR-V is
 written alongside the resolved development pipeline under the OS temporary
 directory. The editor CLI supports asset indexing and release packaging:
 
 ```powershell
 cargo run -p editor -- index game\assets
-cargo run -p editor -- package game\assets pipeline build\release
+cargo run -p editor -- package game\settings.toml build\release
 ```
 
 Run a packaged pipeline directly (the engine reads the paths emitted by the
 editor and does not rescan or resolve assets):
 
 ```powershell
-cargo run -p game -- --release --pipeline build\release\pipeline.pipe
+cargo run -p game -- --release --settings build\release\runtime_settings.toml
 ```
 
 ## Render pipeline and shader format
@@ -96,7 +96,7 @@ asset type:
 ```toml
 [material]
 name = "CubeLit"
-shader = "unlit"
+shader = "CubeLit"
 ```
 
 Shader files use a LALRPOP-generated LR(1) context-free grammar. Each pass
@@ -104,7 +104,7 @@ contains face-culling and queue metadata followed by an HLSL block; HLSL braces,
 comments, and quoted strings are parsed as block content:
 
 ```text
-shader "Unlit" {
+shader "CubeLit" {
     pass "Forward" {
         face "back"
         queue "opaque"
@@ -162,3 +162,56 @@ configurable depth attachment and swapchain, GPU frame-descriptor uniforms,
 and a four-cascade shadow depth-array pass. The cube and plane demonstrate
 cube casting onto plane geometry. Swapchain recreation on window resize and
 additional render-target pass scheduling remain follow-up work.
+
+## Settings, scenes, and ECS
+
+The editor reads a project `settings.toml`. Runtime fields are flattened at the
+top level, while `editor_scene` is development-only:
+
+```toml
+pipeline = "assets/pipeline.pipe"
+default_scene = "assets/scenes/game.scene"
+editor_scene = "assets/scenes/editor.scene"
+```
+
+In development, the editor resolves the pipeline and default scene and creates
+a `RuntimeSettings` value. Release packaging writes a stripped
+`runtime_settings.toml` containing only `pipeline` and `default_scene`.
+
+Scene and prefab TOML share the same root object format. A scene can provide
+`deltaTime`, `timeSinceStart`, a root object, children, transforms, and typed
+component data. The engine initializes components in two phases (`awake`,
+then `start`); components whose `start` returns `true` are put on the scene's
+update list. `ecs::Mesh`, `ecs::ProceduralMesh`, and `ecs::InstancedMesh`
+components queue graphics API draw calls during the framework-managed render
+loop. `Camera` is serializable and supplies the frame and cascaded-shadow
+uniforms.
+
+The sample scene uses the same component schema:
+
+```toml
+[root]
+name = "Game"
+
+[[root.components]]
+type = "Camera"
+
+[[root.children]]
+name = "Cube"
+
+[[root.children.components]]
+type = "Mesh"
+
+[root.children.components.data]
+primitive = "cube"
+material = "CubeLit"
+size = [1.0, 1.0, 1.0]
+```
+
+The editor CLI owns runtime options; the game binary is only a small entry
+point that supplies its project settings path:
+
+```powershell
+cargo run -p game -- --frames 10
+cargo run -p editor -- run --settings game\settings.toml --compile-shaders
+```

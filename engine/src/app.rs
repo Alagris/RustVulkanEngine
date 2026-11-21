@@ -446,6 +446,12 @@ impl App {
         self.gpu_context.clone()
     }
 
+    pub fn set_frame_uniform(&mut self, frame_uniform: FrameUniform) -> Result<()> {
+        self.frame_uniform.update(frame_uniform)?;
+        self.frame_data = frame_uniform;
+        Ok(())
+    }
+
     pub fn render(&mut self, graphics: &mut Graphics) -> Result<()> {
         assert!(
             !self.command_buffer.is_null(),

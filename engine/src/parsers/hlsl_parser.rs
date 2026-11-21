@@ -423,6 +423,37 @@ mod tests {
     }
 
     #[test]
+    fn ignores_bound_resources_with_scalar_and_template_element_types() {
+        let source = r#"
+            [[vk::binding(0, 0)]]
+            RWStructuredBuffer<float> outputBuffer : register(u0);
+            [[vk::binding(1, 0)]]
+            Buffer<uint> inputBuffer : register(t0);
+            float exposure : register(b1);
+            struct VertexInput { float3 position : POSITION; };
+            struct InstanceInput { float4 world0 : INSTANCE0; };
+        "#;
+        let (vertex, instance) = parse_layout(source);
+        assert_eq!(vertex.attributes.len(), 1);
+        assert_eq!(instance.attributes.len(), 1);
+    }
+
+    #[test]
+    fn ignores_non_struct_compute_declarations_containing_braces() {
+        let source = r#"
+            groupshared float cache[64];
+            [numthreads(8, 1, 1)]
+            void CSMain(uint3 dispatchId : SV_DispatchThreadID) {
+                cache[dispatchId.x] = 0.0;
+            }
+            struct VertexInput { float3 position : POSITION; };
+        "#;
+        let (vertex, instance) = parse_layout(source);
+        assert_eq!(vertex.attributes.len(), 1);
+        assert!(instance.attributes.is_empty());
+    }
+
+    #[test]
     fn rejects_empty_vertex_input() {
         let error = parse_input_layouts("struct VertexInput { };").unwrap_err();
         assert!(error.to_string().contains("at least one input field"));

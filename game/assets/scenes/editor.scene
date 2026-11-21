@@ -1,0 +1,8 @@
+deltaTime = 0.0
+timeSinceStart = 0.0
+
+[root]
+name = "Editor"
+
+[[root.components]]
+type = "Camera"

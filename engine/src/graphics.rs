@@ -483,6 +483,7 @@ impl InstanceData for Mat4 {
 pub(crate) struct InstanceBufferHandle {
     allocation: Arc<GpuAllocation>,
     len: usize,
+    layout: VertexLayout,
 }
 
 impl InstanceBufferHandle {
@@ -492,6 +493,10 @@ impl InstanceBufferHandle {
 
     pub(crate) fn len(&self) -> usize {
         self.len
+    }
+
+    pub(crate) fn layout(&self) -> &VertexLayout {
+        &self.layout
     }
 }
 
@@ -519,6 +524,7 @@ impl<T: InstanceData> InstanceBuffer<T> {
         InstanceBufferHandle {
             allocation: Arc::clone(&self.buffer.allocation),
             len: self.buffer.len,
+            layout: self.layout.clone(),
         }
     }
 }
@@ -783,20 +789,27 @@ impl Graphics {
         mesh: &Mesh,
         instances: &InstanceBuffer<T>,
     ) -> Result<()> {
+        self.draw_instanced_buffer(mesh, instances.erase())
+    }
+
+    pub(crate) fn draw_instanced_buffer(
+        &mut self,
+        mesh: &Mesh,
+        instances: InstanceBufferHandle,
+    ) -> Result<()> {
         assert!(
             !mesh.submeshes.is_empty(),
             "instanced draw mesh must contain submeshes"
         );
         assert!(instances.len() > 0, "instanced draw must contain instances");
-        if instances.is_empty() {
+        if instances.len() == 0 {
             bail!("instanced draw must contain at least one instance");
         }
-        validate_material_layouts_for_draw(mesh, &instances.layout)?;
+        validate_material_layouts_for_draw(mesh, instances.layout())?;
         for material in &mesh.materials {
-            Mesh::validate_material_layouts(material, &mesh.vertices.layout, &instances.layout)?;
+            Mesh::validate_material_layouts(material, &mesh.vertices.layout, instances.layout())?;
         }
         let mesh = Arc::new(mesh.clone());
-        let instances = instances.erase();
         for submesh_index in 0..mesh.submeshes.len() {
             self.queued.push(DrawCommand::Instanced {
                 mesh: Arc::clone(&mesh),

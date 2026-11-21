@@ -6,9 +6,4 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-log.workspace = true
-pretty_env_logger.workspace = true
-glam.workspace = true
-engine = { path = "../engine" }
 editor = { path = "../editor" }
-winit.workspace = true
