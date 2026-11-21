@@ -32,8 +32,15 @@ impl Project {
             .to_path_buf();
         let settings_source = fs::read_to_string(&settings_path)
             .with_context(|| format!("Failed to read settings {}", settings_path.display()))?;
-        let mut settings: Settings = toml::from_str(&settings_source)
+        let mut settings: Settings = serde_yaml::from_str(&settings_source)
             .with_context(|| format!("Invalid settings {}", settings_path.display()))?;
+        let assets = AssetDatabase::scan(root.join("assets"))?;
+        settings.runtime.pipeline =
+            resolve_setting_asset(&assets, &settings.runtime.pipeline, AssetType::Pipeline)?;
+        settings.runtime.default_scene =
+            resolve_setting_asset(&assets, &settings.runtime.default_scene, AssetType::Scene)?;
+        settings.editor_scene =
+            resolve_setting_asset(&assets, &settings.editor_scene, AssetType::Scene)?;
         for path in [
             &mut settings.runtime.pipeline,
             &mut settings.runtime.default_scene,
@@ -42,11 +49,7 @@ impl Project {
             if path.as_os_str().is_empty() {
                 bail!("settings paths must not be empty");
             }
-            if !path.is_absolute() {
-                *path = root.join(&*path);
-            }
         }
-        let assets = AssetDatabase::scan(root.join("assets"))?;
         if !settings.runtime.pipeline.is_file() {
             bail!(
                 "configured pipeline does not exist: {}",
@@ -136,9 +139,12 @@ impl Project {
                 .ok_or_else(|| anyhow!("packaged pipeline path has no filename"))?,
             default_scene: scene_relative,
         };
-        let runtime_settings_path = output.join("runtime_settings.toml");
-        fs::write(&runtime_settings_path, toml::to_string(&runtime_settings)?)
-            .with_context(|| format!("Failed to write {}", runtime_settings_path.display()))?;
+        let runtime_settings_path = output.join("runtime_settings.yaml");
+        fs::write(
+            &runtime_settings_path,
+            serde_yaml::to_string(&runtime_settings)?,
+        )
+        .with_context(|| format!("Failed to write {}", runtime_settings_path.display()))?;
         Ok(runtime_settings_path)
     }
 
@@ -156,11 +162,44 @@ impl Project {
             .join(format!("settings-{}-{}", std::process::id(), file_nonce()));
         fs::create_dir_all(&output)?;
         let settings = self.prepare_development()?;
-        let settings_path = output.join("runtime_settings.toml");
-        fs::write(&settings_path, toml::to_string(&settings)?)
+        let settings_path = output.join("runtime_settings.yaml");
+        fs::write(&settings_path, serde_yaml::to_string(&settings)?)
             .with_context(|| format!("Failed to write {}", settings_path.display()))?;
         Ok(settings_path)
     }
+}
+
+fn resolve_setting_asset(
+    assets: &AssetDatabase,
+    setting: &Path,
+    asset_type: AssetType,
+) -> Result<PathBuf> {
+    let file_name = setting
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| anyhow!("settings asset name must not be empty"))?;
+    let name = Path::new(file_name)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| anyhow!("settings asset name is invalid: {}", setting.display()))?;
+    if Path::new(file_name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        != Some(asset_type.extension())
+    {
+        bail!(
+            "settings asset '{}' must have the .{} extension",
+            file_name,
+            asset_type.extension()
+        );
+    }
+    Ok(assets
+        .resolve(&AssetRef {
+            name: name.to_owned(),
+            asset_type,
+        })?
+        .to_path_buf())
 }
 
 #[cfg(test)]
@@ -176,39 +215,68 @@ mod tests {
     }
 
     #[test]
-    fn deserializes_flattened_runtime_fields_and_serializes_runtime_subset() {
+    fn deserializes_asset_names_and_serializes_runtime_paths_without_editor_scene() {
         let source = r#"
-pipeline = "assets/pipeline.pipe"
-default_scene = "assets/scenes/game.scene"
-editor_scene = "assets/scenes/editor.scene"
+pipeline: pipeline.pipe
+default_scene: game.scene
+editor_scene: editor.scene
 "#;
-        let settings: Settings = toml::from_str(source).unwrap();
-        assert_eq!(
-            settings.runtime.pipeline,
-            PathBuf::from("assets/pipeline.pipe")
-        );
-        assert_eq!(
-            settings.runtime.default_scene,
-            PathBuf::from("assets/scenes/game.scene")
-        );
-        let runtime_toml = toml::to_string(&settings.runtime).unwrap();
-        assert!(!runtime_toml.contains("editor_scene"));
-        assert!(runtime_toml.contains("default_scene"));
+        let settings: Settings = serde_yaml::from_str(source).unwrap();
+        assert_eq!(settings.runtime.pipeline, PathBuf::from("pipeline.pipe"));
+        assert_eq!(settings.runtime.default_scene, PathBuf::from("game.scene"));
+        let runtime_yaml = serde_yaml::to_string(&settings.runtime).unwrap();
+        assert!(!runtime_yaml.contains("editor_scene"));
+        assert!(runtime_yaml.contains("default_scene"));
     }
 
     #[test]
     fn runtime_settings_resolve_paths_relative_to_the_settings_file() {
         let directory = temp_dir();
         fs::create_dir_all(&directory).unwrap();
-        let path = directory.join("runtime_settings.toml");
+        let path = directory.join("runtime_settings.yaml");
         fs::write(
             &path,
-            "pipeline = \"pipeline.pipe\"\ndefault_scene = \"scene.scene\"\n",
+            "pipeline: pipeline.pipe\ndefault_scene: scene.scene\n",
         )
         .unwrap();
         let settings = RuntimeSettings::load(&path).unwrap();
         assert_eq!(settings.pipeline, directory.join("pipeline.pipe"));
         assert_eq!(settings.default_scene, directory.join("scene.scene"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn project_resolves_short_settings_names_to_typed_asset_paths() {
+        let directory = temp_dir();
+        let assets = directory.join("assets");
+        fs::create_dir_all(assets.join("scenes")).unwrap();
+        fs::write(assets.join("pipeline.pipe"), "passes: []\n").unwrap();
+        fs::write(assets.join("scenes/game.scene"), "root:\n  name: Game\n").unwrap();
+        fs::write(
+            assets.join("scenes/editor.scene"),
+            "root:\n  name: Editor\n",
+        )
+        .unwrap();
+        let settings_path = directory.join("settings.yaml");
+        fs::write(
+            &settings_path,
+            "pipeline: pipeline.pipe\ndefault_scene: game.scene\neditor_scene: editor.scene\n",
+        )
+        .unwrap();
+
+        let project = Project::load(&settings_path).unwrap();
+        assert_eq!(
+            project.settings().runtime.pipeline,
+            assets.join("pipeline.pipe").canonicalize().unwrap()
+        );
+        assert_eq!(
+            project.settings().runtime.default_scene,
+            assets.join("scenes/game.scene").canonicalize().unwrap()
+        );
+        assert_eq!(
+            project.settings().editor_scene,
+            assets.join("scenes/editor.scene").canonicalize().unwrap()
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 }

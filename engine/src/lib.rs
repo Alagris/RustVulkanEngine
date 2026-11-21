@@ -1,5 +1,6 @@
 #![allow(unsafe_op_in_unsafe_fn, clippy::too_many_arguments)]
 
+pub mod anim;
 pub mod app;
 pub mod ecs;
 pub mod graphics;

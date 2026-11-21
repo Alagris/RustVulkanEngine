@@ -36,7 +36,7 @@ pub fn run_cli(default_settings: impl AsRef<Path>) -> Result<()> {
         Some("package") => {
             let settings_path =
                 PathBuf::from(args.next().ok_or_else(|| {
-                    anyhow!("usage: editor package <settings.toml> <output-dir>")
+                    anyhow!("usage: editor package <settings.yaml> <output-dir>")
                 })?);
             let output = PathBuf::from(
                 args.next()
@@ -77,7 +77,7 @@ fn run_game(
                 settings_path = args
                     .next()
                     .map(PathBuf::from)
-                    .ok_or_else(|| anyhow!("--settings requires a TOML file path"))?;
+                    .ok_or_else(|| anyhow!("--settings requires a YAML file path"))?;
             }
             Some("--release") => release_mode = true,
             Some("--compile-shaders") => compile_only = true,
@@ -124,6 +124,6 @@ fn run_game(
 
 fn print_usage() {
     println!(
-        "Usage:\n  editor [run] [--settings <settings.toml>] [--release] [--compile-shaders] [--frames <count>]\n  editor index <asset-root>\n  editor package <settings.toml> <output-dir>"
+        "Usage:\n  editor [run] [--settings <settings.yaml>] [--release] [--compile-shaders] [--frames <count>]\n  editor index <asset-root>\n  editor package <settings.yaml> <output-dir>"
     );
 }

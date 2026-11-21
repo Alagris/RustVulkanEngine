@@ -1,28 +1,32 @@
+use crate::ecs::GameObject;
 use crate::ecs::Scene;
-use crate::graphics::{Graphics, Transform};
+use crate::graphics::Graphics;
 use anyhow::{Result, anyhow};
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 pub trait Component: Any {
-    fn awake(&mut self, _scene: &Scene) {}
-    fn start(&mut self, _scene: &Scene) -> bool {
+    fn awake(&mut self, _scene: &Scene, _game_object: &GameObject) {}
+    fn start(&mut self, _scene: &Scene, _game_object: &GameObject) -> bool {
         false
     }
-    fn update(&mut self, _scene: &Scene) {}
-    fn render(
+    fn update(
         &mut self,
         _scene: &Scene,
-        _world_transform: Transform,
+        _game_object: &GameObject,
         _graphics: &mut Graphics,
     ) -> Result<()> {
         Ok(())
     }
+    fn destroy(&mut self, _scene: &Scene, _game_object: &GameObject) -> Result<()> {
+        Ok(())
+    }
     fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
-type ComponentFactory = Arc<dyn Fn(&toml::Value) -> Result<Box<dyn Component>>>;
+type ComponentFactory = Arc<dyn Fn(&serde_yaml::Value) -> Result<Box<dyn Component>>>;
 
 pub struct ComponentRegistry {
     factories: HashMap<String, ComponentFactory>,
@@ -35,9 +39,7 @@ impl Default for ComponentRegistry {
         };
         registry
             .register("Camera", |data| {
-                let camera: crate::ecs::Camera = data
-                    .clone()
-                    .try_into()
+                let camera: crate::ecs::Camera = serde_yaml::from_value(data.clone())
                     .map_err(|error| anyhow!("invalid Camera component data: {error}"))?;
                 Ok(Box::new(camera))
             })
@@ -54,7 +56,7 @@ impl ComponentRegistry {
     pub fn register(
         &mut self,
         type_name: impl Into<String>,
-        factory: impl Fn(&toml::Value) -> Result<Box<dyn Component>> + 'static,
+        factory: impl Fn(&serde_yaml::Value) -> Result<Box<dyn Component>> + 'static,
     ) -> Result<()> {
         let type_name = type_name.into();
         if type_name.trim().is_empty() {
@@ -70,7 +72,11 @@ impl ComponentRegistry {
         Ok(())
     }
 
-    pub(crate) fn create(&self, type_name: &str, data: &toml::Value) -> Result<Box<dyn Component>> {
+    pub(crate) fn create(
+        &self,
+        type_name: &str,
+        data: &serde_yaml::Value,
+    ) -> Result<Box<dyn Component>> {
         let factory = self
             .factories
             .get(type_name)

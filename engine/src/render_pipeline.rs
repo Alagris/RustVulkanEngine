@@ -584,7 +584,7 @@ shader "Test" {
         let base_dir = temporary_directory("missing-pass");
         fs::write(
             base_dir.join("cube.mat"),
-            "[material]\nname = \"Cube\"\nshader = \"shader.shader\"\n",
+            "material:\n  name: Cube\n  shader: shader.shader\n",
         )
         .unwrap();
         fs::write(
@@ -601,17 +601,16 @@ shader "Test" {
         )
         .unwrap();
         let source = r#"
-[pipeline]
-name = "Invalid"
-
-[[passes]]
-name = "Missing"
-material = "cube.mat"
-shader_pass = "NotDeclared"
-color_target = "swapchain"
+pipeline:
+  name: Invalid
+passes:
+  - name: Missing
+    material: cube.mat
+    shader_pass: NotDeclared
+    color_target: swapchain
 "#;
         assert!(
-            RenderPipeline::from_toml(source, &base_dir)
+            RenderPipeline::from_yaml(source, &base_dir)
                 .unwrap_err()
                 .to_string()
                 .contains("not declared")

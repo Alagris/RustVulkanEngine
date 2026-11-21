@@ -1,4 +1,4 @@
-use crate::ecs::{Component, Scene};
+use crate::ecs::{Component, GameObject, Scene};
 use crate::graphics::FrameUniform;
 use anyhow::{Result, bail};
 use glam::{Mat4, Vec3, Vec4};
@@ -135,7 +135,11 @@ impl Component for Camera {
         self
     }
 
-    fn start(&mut self, _scene: &Scene) -> bool {
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn start(&mut self, _scene: &Scene, _game_object: &GameObject) -> bool {
         false
     }
 }
@@ -147,8 +151,8 @@ mod tests {
     #[test]
     fn camera_is_serializable_and_builds_frame_uniforms() {
         let camera = Camera::default();
-        let serialized = toml::to_string(&camera).unwrap();
-        let parsed: Camera = toml::from_str(&serialized).unwrap();
+        let serialized = serde_yaml::to_string(&camera).unwrap();
+        let parsed: Camera = serde_yaml::from_str(&serialized).unwrap();
         assert_eq!(parsed.position, camera.position);
         let frame = parsed.frame_uniform(16.0 / 9.0, 4).unwrap();
         assert_eq!(frame.cascade_index, 0);

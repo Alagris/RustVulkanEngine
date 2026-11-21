@@ -36,67 +36,62 @@ cargo run -p game -- --compile-shaders
 ```
 
 Choose another project configuration with
-`cargo run -p game -- --settings path\to\settings.toml`. Compiled SPIR-V is
+`cargo run -p game -- --settings path\to\settings.yaml`. Compiled SPIR-V is
 written alongside the resolved development pipeline under the OS temporary
 directory. The editor CLI supports asset indexing and release packaging:
 
 ```powershell
 cargo run -p editor -- index game\assets
-cargo run -p editor -- package game\settings.toml build\release
+cargo run -p editor -- package game\settings.yaml build\release
 ```
 
 Run a packaged pipeline directly (the engine reads the paths emitted by the
 editor and does not rescan or resolve assets):
 
 ```powershell
-cargo run -p game -- --release --settings build\release\runtime_settings.toml
+cargo run -p game -- --release --settings build\release\runtime_settings.yaml
 ```
 
 ## Render pipeline and shader format
 
-Render passes are configured in TOML and ordered as listed:
+Render passes and render targets are configured in YAML and ordered as listed:
 
-```toml
-[pipeline]
-name = "Forward"
-
-[swapchain]
-image_count = 3
-present_mode = "fifo"
-color_format = "bgra8_srgb"
-
-[render_buffers.depth]
-width = 0
-height = 0
-format = "d32_float"
-
-[render_buffers.shadow]
-width = 2048
-height = 2048
-format = "d32_float"
-shadow_cascades = 4
-
-[[passes]]
-name = "ForwardOpaque"
-material = "cube"
-shader_pass = "Forward"
-color_target = "swapchain"
-clear_color = [0.08, 0.1, 0.14, 1.0]
-
-[[passes]]
-name = "ShadowCascades"
-material = "cube"
-shader_pass = "ShadowCascade"
-color_target = "shadow_cascades"
+```yaml
+pipeline:
+  name: Forward
+swapchain:
+  image_count: 3
+  present_mode: fifo
+  color_format: bgra8_srgb
+render_buffers:
+  depth:
+    width: 0
+    height: 0
+    format: d32_float
+  shadow:
+    width: 2048
+    height: 2048
+    format: d32_float
+    shadow_cascades: 4
+passes:
+  - name: ForwardOpaque
+    material: cube
+    shader_pass: Forward
+    color_target: swapchain
+    clear_color: [0.08, 0.1, 0.14, 1.0]
+  - name: ShadowCascades
+    material: cube
+    shader_pass: ShadowCascade
+    color_target: shadow_cascades
 ```
 
 Each material references its shader by plain name; the editor resolves it by
 asset type:
 
-```toml
-[material]
-name = "CubeLit"
-shader = "CubeLit"
+```yaml
+material:
+  name: CubeLit
+  shader: CubeLit
 ```
 
 Shader files use a LALRPOP-generated LR(1) context-free grammar. Each pass
@@ -147,8 +142,10 @@ graphics.draw_procedural(material, vertex_count, instance_count)?;
 app.render(&mut graphics)?;
 ```
 
-`Transform` is `glam::Mat4`; vertex positions/colors and uniform vector/matrix
-values also use glam types. Material uniforms can be set and read by name via
+GameObject transforms and `TransformDefinition` use `cgmath::Matrix4`,
+`Vector3`, and quaternion rotations; matrices are converted to glam at the
+renderer boundary. Vertex positions/colors and renderer uniform values use
+glam types. Material uniforms can be set and read by name via
 `set_uniform` and `uniform`. `InstanceBuffer<T>` currently expects the
 layout implemented by `InstanceData` for `T`; implement that trait to describe
 your own GPU instance layout. Vertex buffers can likewise be created from raw
@@ -165,47 +162,69 @@ additional render-target pass scheduling remain follow-up work.
 
 ## Settings, scenes, and ECS
 
-The editor reads a project `settings.toml`. Runtime fields are flattened at the
+The editor reads a project `settings.yaml`. Runtime fields are flattened at the
 top level, while `editor_scene` is development-only:
 
-```toml
-pipeline = "assets/pipeline.pipe"
-default_scene = "assets/scenes/game.scene"
-editor_scene = "assets/scenes/editor.scene"
+```yaml
+pipeline: pipeline.pipe
+default_scene: game.scene
+editor_scene: editor.scene
 ```
 
 In development, the editor resolves the pipeline and default scene and creates
 a `RuntimeSettings` value. Release packaging writes a stripped
-`runtime_settings.toml` containing only `pipeline` and `default_scene`.
+`runtime_settings.yaml` containing only `pipeline` and `default_scene`.
 
-Scene and prefab TOML share the same root object format. A scene can provide
+Scene and prefab YAML share the same root object format. A scene can provide
 `deltaTime`, `timeSinceStart`, a root object, children, transforms, and typed
 component data. The engine initializes components in two phases (`awake`,
-then `start`); components whose `start` returns `true` are put on the scene's
-update list. `ecs::Mesh`, `ecs::ProceduralMesh`, and `ecs::InstancedMesh`
-components queue graphics API draw calls during the framework-managed render
-loop. `Camera` is serializable and supplies the frame and cascaded-shadow
-uniforms.
+then `start`); components whose `start` returns `true` receive `update` each
+frame. `update` now also receives the owning `GameObject` and `Graphics`, so
+rendering and component updates happen in one callback. `awake`, `start`, and
+`destroy` also receive their owning object.
+
+Components can change an object's transform through `GameObject::set_transform`.
+For changes to another object, use
+`Scene::defer_game_object_mutation(object_id, |object| ...)`. Structural
+component additions/removals use `GameObject::add_component(scene, ...)` and
+`GameObject::remove_component(scene, index)`; they are applied after the
+current component-update traversal. Components live in a flat scene-wide
+registry, and swap-removal repairs both the moved component's index and its
+owner's index list.
+`ecs::Mesh`, `ecs::ProceduralMesh`, and `ecs::InstancedMesh` queue graphics API
+draw calls through their unified `update` callback. `Camera` is serializable
+and supplies the frame and cascaded-shadow uniforms.
+
+The engine exposes `graphics::fbx::load_meshes_from_fbx` and
+`graphics::fbx::load_animations_from_fbx` using the pure-Rust `fbx-reader`
+crate. Imported meshes use the supplied material and preserve FBX model
+transforms and units. `SkinnedMesh` stores skeleton and inverse-bind data;
+`Animator` selects a loaded clip, finds a `SkinnedMesh` on the same
+`GameObject`, evaluates bone poses, prepares per-vertex blend matrices, and
+dispatches vertex deformation through an embedded Vulkan compute shader. The
+current FBX reader exposes per-control-point influences only through its CPU
+API, so matrix blending is prepared on the CPU while vertex transformation is
+performed on the GPU.
 
 The sample scene uses the same component schema:
 
-```toml
-[root]
-name = "Game"
-
-[[root.components]]
-type = "Camera"
-
-[[root.children]]
-name = "Cube"
-
-[[root.children.components]]
-type = "Mesh"
-
-[root.children.components.data]
-primitive = "cube"
-material = "CubeLit"
-size = [1.0, 1.0, 1.0]
+```yaml
+root:
+  name: Game
+  components:
+    - type: Camera
+  children:
+    - name: Cube
+      transform:
+        translation: [0.0, -0.15, 0.0]
+        rotation: [-0.21140331, 0.31124407, 0.07122724, 0.9237762]
+        scale: [1.0, 1.5, 1.0]
+      components:
+        - type: Mesh
+          data:
+            primitive: cube
+            material: CubeLit
+            size: [1.0, 1.0, 1.0]
 ```
 
 The editor CLI owns runtime options; the game binary is only a small entry
@@ -213,5 +232,5 @@ point that supplies its project settings path:
 
 ```powershell
 cargo run -p game -- --frames 10
-cargo run -p editor -- run --settings game\settings.toml --compile-shaders
+cargo run -p editor -- run --settings game\settings.yaml --compile-shaders
 ```

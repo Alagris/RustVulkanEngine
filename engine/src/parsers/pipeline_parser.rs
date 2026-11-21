@@ -110,12 +110,13 @@ impl RenderPipeline {
         let source = fs::read_to_string(path)
             .with_context(|| format!("Failed to read render pipeline {}", path.display()))?;
         let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
-        Self::from_toml(&source, base_dir)
+        Self::from_yaml(&source, base_dir)
             .with_context(|| format!("Invalid render pipeline {}", path.display()))
     }
 
-    pub(crate) fn from_toml(source: &str, base_dir: &Path) -> Result<Self> {
-        let config: PipelineFile = toml::from_str(source).context("Failed to parse TOML")?;
+    pub(crate) fn from_yaml(source: &str, base_dir: &Path) -> Result<Self> {
+        let config: PipelineFile =
+            serde_yaml::from_str(source).context("Failed to parse pipeline YAML")?;
         if config.pipeline.name.trim().is_empty() {
             bail!("pipeline.name must not be empty");
         }

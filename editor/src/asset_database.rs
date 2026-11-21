@@ -171,11 +171,11 @@ impl AssetDatabase {
         let pipeline = pipeline
             .canonicalize()
             .with_context(|| format!("Failed to resolve pipeline {}", pipeline.display()))?;
-        let mut pipeline_value = read_toml(&pipeline)?;
+        let mut pipeline_value = read_yaml(&pipeline)?;
         let passes = pipeline_value
             .get_mut("passes")
-            .and_then(toml::Value::as_array_mut)
-            .ok_or_else(|| anyhow!("pipeline must contain a [[passes]] array"))?;
+            .and_then(serde_yaml::Value::as_sequence_mut)
+            .ok_or_else(|| anyhow!("pipeline must contain a passes sequence"))?;
         let output = std::env::temp_dir()
             .join("rust-vulkan-game-engine")
             .join("development")
@@ -184,20 +184,25 @@ impl AssetDatabase {
         for pass in passes {
             let material_name = pass
                 .get("material")
-                .and_then(toml::Value::as_str)
+                .and_then(serde_yaml::Value::as_str)
                 .ok_or_else(|| anyhow!("each pipeline pass must name a material asset"))?;
             let material_path = self.resolve(&AssetRef {
                 name: material_name.to_owned(),
                 asset_type: AssetType::Material,
             })?;
-            let mut material_value = read_toml(material_path)?;
+            let mut material_value = read_yaml(material_path)?;
             let material_table = material_value
                 .get_mut("material")
-                .and_then(toml::Value::as_table_mut)
-                .ok_or_else(|| anyhow!("{} must contain [material]", material_path.display()))?;
+                .and_then(serde_yaml::Value::as_mapping_mut)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "{} must contain a material mapping",
+                        material_path.display()
+                    )
+                })?;
             let shader_name = material_table
                 .get("shader")
-                .and_then(toml::Value::as_str)
+                .and_then(serde_yaml::Value::as_str)
                 .ok_or_else(|| {
                     anyhow!(
                         "{} material must name a shader asset",
@@ -209,23 +214,23 @@ impl AssetDatabase {
                 asset_type: AssetType::Shader,
             })?;
             material_table.insert(
-                "shader".to_owned(),
-                toml::Value::String(shader_path.display().to_string()),
+                serde_yaml::Value::String("shader".to_owned()),
+                serde_yaml::Value::String(shader_path.display().to_string()),
             );
             let material_output = output
                 .join("materials")
                 .join(format!("{}.mat", material_name));
-            fs::write(&material_output, toml::to_string(&material_value)?)
+            fs::write(&material_output, serde_yaml::to_string(&material_value)?)
                 .with_context(|| format!("Failed to write {}", material_output.display()))?;
-            pass.as_table_mut()
-                .ok_or_else(|| anyhow!("pipeline pass must be a table"))?
+            pass.as_mapping_mut()
+                .ok_or_else(|| anyhow!("pipeline pass must be a mapping"))?
                 .insert(
-                    "material".to_owned(),
-                    toml::Value::String(material_output.display().to_string()),
+                    serde_yaml::Value::String("material".to_owned()),
+                    serde_yaml::Value::String(material_output.display().to_string()),
                 );
         }
         let resolved_pipeline = output.join("pipeline.pipe");
-        fs::write(&resolved_pipeline, toml::to_string(&pipeline_value)?)
+        fs::write(&resolved_pipeline, serde_yaml::to_string(&pipeline_value)?)
             .with_context(|| format!("Failed to write {}", resolved_pipeline.display()))?;
         Ok(resolved_pipeline)
     }
@@ -234,17 +239,17 @@ impl AssetDatabase {
         let pipeline = pipeline
             .canonicalize()
             .with_context(|| format!("Failed to resolve pipeline {}", pipeline.display()))?;
-        let mut pipeline_value = read_toml(&pipeline)?;
+        let mut pipeline_value = read_yaml(&pipeline)?;
         let passes = pipeline_value
             .get("passes")
-            .and_then(toml::Value::as_array)
-            .ok_or_else(|| anyhow!("pipeline must contain a [[passes]] array"))?;
+            .and_then(serde_yaml::Value::as_sequence)
+            .ok_or_else(|| anyhow!("pipeline must contain a passes sequence"))?;
         let mut materials = BTreeSet::new();
         let mut shaders = BTreeSet::new();
         for pass in passes.iter() {
             let name = pass
                 .get("material")
-                .and_then(toml::Value::as_str)
+                .and_then(serde_yaml::Value::as_str)
                 .ok_or_else(|| anyhow!("each pipeline pass must name a material asset"))?
                 .to_owned();
             materials.insert(name.to_owned());
@@ -254,11 +259,11 @@ impl AssetDatabase {
                 name: material_name.clone(),
                 asset_type: AssetType::Material,
             })?;
-            let material_value = read_toml(material_path)?;
+            let material_value = read_yaml(material_path)?;
             let shader_name = material_value
                 .get("material")
                 .and_then(|material| material.get("shader"))
-                .and_then(toml::Value::as_str)
+                .and_then(serde_yaml::Value::as_str)
                 .ok_or_else(|| {
                     anyhow!(
                         "{} material must name a shader asset",
@@ -270,19 +275,19 @@ impl AssetDatabase {
 
         for pass in pipeline_value
             .get_mut("passes")
-            .and_then(toml::Value::as_array_mut)
-            .ok_or_else(|| anyhow!("pipeline must contain a [[passes]] array"))?
+            .and_then(serde_yaml::Value::as_sequence_mut)
+            .ok_or_else(|| anyhow!("pipeline must contain a passes sequence"))?
         {
             let name = pass
                 .get("material")
-                .and_then(toml::Value::as_str)
+                .and_then(serde_yaml::Value::as_str)
                 .ok_or_else(|| anyhow!("each pipeline pass must name a material asset"))?
                 .to_owned();
-            pass.as_table_mut()
-                .ok_or_else(|| anyhow!("pipeline pass must be a table"))?
+            pass.as_mapping_mut()
+                .ok_or_else(|| anyhow!("pipeline pass must be a mapping"))?
                 .insert(
-                    "material".to_owned(),
-                    toml::Value::String(format!("materials/{name}.mat")),
+                    serde_yaml::Value::String("material".to_owned()),
+                    serde_yaml::Value::String(format!("materials/{name}.mat")),
                 );
         }
 
@@ -299,7 +304,7 @@ impl AssetDatabase {
                 .file_name()
                 .ok_or_else(|| anyhow!("pipeline path has no filename"))?;
             let staged_pipeline = stage.join(pipeline_name);
-            fs::write(&staged_pipeline, toml::to_string(&pipeline_value)?)
+            fs::write(&staged_pipeline, serde_yaml::to_string(&pipeline_value)?)
                 .with_context(|| format!("Failed to stage {}", pipeline.display()))?;
             let packaged_pipeline = output.join(pipeline_name);
             self.process(AssetType::Pipeline, &staged_pipeline, &packaged_pipeline)?;
@@ -309,23 +314,25 @@ impl AssetDatabase {
                     name: material_name.clone(),
                     asset_type: AssetType::Material,
                 })?;
-                let mut value = read_toml(source)?;
+                let mut value = read_yaml(source)?;
                 let material_table = value
                     .get_mut("material")
-                    .and_then(toml::Value::as_table_mut)
-                    .ok_or_else(|| anyhow!("{} must contain [material]", source.display()))?;
+                    .and_then(serde_yaml::Value::as_mapping_mut)
+                    .ok_or_else(|| {
+                        anyhow!("{} must contain a material mapping", source.display())
+                    })?;
                 let shader_name = material_table
                     .get("shader")
-                    .and_then(toml::Value::as_str)
+                    .and_then(serde_yaml::Value::as_str)
                     .ok_or_else(|| {
                         anyhow!("{} material must name a shader asset", source.display())
                     })?;
                 material_table.insert(
-                    "shader".to_owned(),
-                    toml::Value::String(format!("../shaders/{shader_name}.shader")),
+                    serde_yaml::Value::String("shader".to_owned()),
+                    serde_yaml::Value::String(format!("../shaders/{shader_name}.shader")),
                 );
                 let staged_material = stage.join(format!("{material_name}.mat"));
-                fs::write(&staged_material, toml::to_string(&value)?)
+                fs::write(&staged_material, serde_yaml::to_string(&value)?)
                     .with_context(|| format!("Failed to stage {}", source.display()))?;
                 self.process(
                     AssetType::Material,
@@ -383,10 +390,10 @@ impl AssetDatabase {
     }
 }
 
-pub(crate) fn read_toml(path: &Path) -> Result<toml::Value> {
+pub(crate) fn read_yaml(path: &Path) -> Result<serde_yaml::Value> {
     let text =
         fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    toml::from_str(&text).with_context(|| format!("Invalid TOML in {}", path.display()))
+    serde_yaml::from_str(&text).with_context(|| format!("Invalid YAML in {}", path.display()))
 }
 
 pub(crate) fn file_nonce() -> u128 {
@@ -416,19 +423,19 @@ mod tests {
         fs::write(
             root.join("pipeline.pipe"),
             r#"
-[pipeline]
-name = "Test"
-[[passes]]
-name = "Forward"
-material = "lit"
-shader_pass = "Main"
-color_target = "swapchain"
+pipeline:
+  name: Test
+passes:
+  - name: Forward
+    material: lit
+    shader_pass: Main
+    color_target: swapchain
 "#,
         )
         .unwrap();
         fs::write(
             root.join("materials").join("lit.mat"),
-            "[material]\nname = \"Lit\"\nshader = \"LitShader\"\n",
+            "material:\n  name: Lit\n  shader: LitShader\n",
         )
         .unwrap();
         let shader = r#"shader "LitShader" {
@@ -513,14 +520,14 @@ color_target = "swapchain"
         let prepared = database
             .prepare_development_pipeline(&root.join("pipeline.pipe"))
             .unwrap();
-        let pipeline = read_toml(&prepared).unwrap();
+        let pipeline = read_yaml(&prepared).unwrap();
         let material_path = PathBuf::from(
             pipeline["passes"][0]["material"]
                 .as_str()
                 .expect("resolved material path"),
         );
         assert!(material_path.is_absolute());
-        let material = read_toml(&material_path).unwrap();
+        let material = read_yaml(&material_path).unwrap();
         let shader_path = PathBuf::from(
             material["material"]["shader"]
                 .as_str()
@@ -529,7 +536,7 @@ color_target = "swapchain"
         assert!(shader_path.is_absolute());
         assert!(shader_path.is_file());
         assert_eq!(
-            read_toml(&root.join("materials").join("lit.mat")).unwrap()["material"]["shader"]
+            read_yaml(&root.join("materials").join("lit.mat")).unwrap()["material"]["shader"]
                 .as_str(),
             Some("LitShader")
         );
@@ -564,7 +571,7 @@ color_target = "swapchain"
         let packaged = database
             .package(&root.join("pipeline.pipe"), &output)
             .unwrap();
-        let pipeline = read_toml(&packaged).unwrap();
+        let pipeline = read_yaml(&packaged).unwrap();
         assert_eq!(
             pipeline["passes"][0]["material"].as_str(),
             Some("materials/lit.mat")
@@ -575,7 +582,7 @@ color_target = "swapchain"
                 .contains("# pipeline processed")
         );
         let material_path = output.join("materials").join("lit.mat");
-        let material = read_toml(&material_path).unwrap();
+        let material = read_yaml(&material_path).unwrap();
         assert_eq!(
             material["material"]["shader"].as_str(),
             Some("../shaders/LitShader.shader")

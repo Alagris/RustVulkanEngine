@@ -8,8 +8,10 @@ use crate::settings::RuntimeSettings;
 use anyhow::{Context, Result, anyhow};
 use glam::{Mat4, Vec3A};
 use serde::Deserialize;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use winit::dpi::LogicalSize;
@@ -80,21 +82,32 @@ impl RenderLoop {
         let context = app.gpu_context();
         register_mesh_components(&mut registry, context, materials)?;
         let mut scene = Scene::load(&settings.default_scene, &registry)?;
-        scene.initialize();
+        scene.initialize()?;
         let size = window.inner_size();
-        app.set_frame_uniform(frame_for_scene(
+        let initial_frame = frame_for_scene(
             &scene,
             &default_camera,
             size.width as f32 / size.height.max(1) as f32,
             pipeline.render_buffers.shadow_cascades,
-        )?)?;
+        )
+        .and_then(|frame| app.set_frame_uniform(frame));
+        if let Err(error) = initial_frame {
+            return match scene.destroy() {
+                Ok(()) => Err(error),
+                Err(destroy_error) => Err(anyhow!(
+                    "runtime setup failed: {error:#}; scene destruction also failed: {destroy_error:#}"
+                )),
+            };
+        }
+        let scene = Rc::new(RefCell::new(scene));
+        let callback_scene = Rc::clone(&scene);
         let mut graphics = Graphics::default();
         let render_error = Arc::new(Mutex::new(None));
         let callback_error = Arc::clone(&render_error);
         let mut rendered_frames = 0_u32;
         let mut previous_frame = Instant::now();
 
-        event_loop.run(move |event, elwt| match event {
+        let event_result = event_loop.run(move |event, elwt| match event {
             Event::AboutToWait => window.request_redraw(),
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::RedrawRequested if !elwt.exiting() => {
@@ -105,18 +118,17 @@ impl RenderLoop {
                     let now = Instant::now();
                     let delta = now.duration_since(previous_frame).as_secs_f32();
                     previous_frame = now;
-                    let result = scene
-                        .update(delta)
+                    let update_result = callback_scene.borrow_mut().update(delta, &mut graphics);
+                    let result = update_result
                         .and_then(|()| {
                             let frame = frame_for_scene(
-                                &scene,
+                                &callback_scene.borrow(),
                                 &default_camera,
                                 size.width as f32 / size.height as f32,
                                 pipeline.render_buffers.shadow_cascades,
                             )?;
                             app.set_frame_uniform(frame)
                         })
-                        .and_then(|()| scene.render(&mut graphics))
                         .and_then(|()| app.render(&mut graphics));
                     match result {
                         Ok(()) => {
@@ -144,7 +156,17 @@ impl RenderLoop {
                 _ => {}
             },
             _ => {}
-        })?;
+        });
+        let destroy_result = scene.borrow().destroy();
+        if let Err(event_error) = event_result {
+            return match destroy_result {
+                Ok(()) => Err(event_error.into()),
+                Err(destroy_error) => Err(anyhow!(
+                    "event loop failed: {event_error}; scene destruction also failed: {destroy_error:#}"
+                )),
+            };
+        }
+        destroy_result?;
         if let Some(error) = render_error
             .lock()
             .map_err(|_| anyhow!("render error state was poisoned"))?
@@ -244,7 +266,7 @@ fn register_mesh_components(
         let context = context.clone();
         let materials = Arc::clone(&materials);
         registry.register("Mesh", move |data| {
-            let settings: PrimitiveMeshSettings = data.clone().try_into()?;
+            let settings: PrimitiveMeshSettings = serde_yaml::from_value(data.clone())?;
             let material = get_material(&materials, &settings.material)?;
             let mesh = create_primitive_mesh(&context, material, &settings)?;
             Ok(Box::new(Mesh::new(mesh)))
@@ -253,7 +275,7 @@ fn register_mesh_components(
     {
         let materials = Arc::clone(&materials);
         registry.register("ProceduralMesh", move |data| {
-            let settings: ProceduralMeshSettings = data.clone().try_into()?;
+            let settings: ProceduralMeshSettings = serde_yaml::from_value(data.clone())?;
             let material = get_material(&materials, &settings.material)?;
             Ok(Box::new(ProceduralMesh::new(
                 material,
@@ -264,7 +286,7 @@ fn register_mesh_components(
     }
     {
         registry.register("InstancedMesh", move |data| {
-            let settings: InstancedMeshSettings = data.clone().try_into()?;
+            let settings: InstancedMeshSettings = serde_yaml::from_value(data.clone())?;
             let material = get_material(&materials, &settings.primitive.material)?;
             let mesh = create_primitive_mesh(&context, material, &settings.primitive)?;
             let transforms = settings

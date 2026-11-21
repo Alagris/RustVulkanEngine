@@ -24,8 +24,8 @@ struct MaterialSettings {
 pub fn parse(path: &Path) -> Result<MaterialAsset> {
     let source = fs::read_to_string(path)
         .with_context(|| format!("Failed to read material {}", path.display()))?;
-    let file: MaterialFile =
-        toml::from_str(&source).with_context(|| format!("Invalid material {}", path.display()))?;
+    let file: MaterialFile = serde_yaml::from_str(&source)
+        .with_context(|| format!("Invalid material {}", path.display()))?;
     if file.material.name.trim().is_empty() {
         bail!("material name must not be empty in {}", path.display());
     }

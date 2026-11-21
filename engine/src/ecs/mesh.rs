@@ -1,6 +1,6 @@
-use crate::ecs::{Component, Scene};
+use crate::ecs::{Component, GameObject, Scene};
 use crate::graphics::{
-    Graphics, InstanceBuffer, InstanceBufferHandle, InstanceData, Mesh as GraphicsMesh, Transform,
+    Graphics, InstanceBuffer, InstanceBufferHandle, InstanceData, Mesh as GraphicsMesh,
 };
 use crate::material::Material;
 use anyhow::Result;
@@ -26,13 +26,21 @@ impl Component for Mesh {
         self
     }
 
-    fn render(
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn start(&mut self, _scene: &Scene, _game_object: &GameObject) -> bool {
+        true
+    }
+
+    fn update(
         &mut self,
         _scene: &Scene,
-        world_transform: Transform,
+        game_object: &GameObject,
         graphics: &mut Graphics,
     ) -> Result<()> {
-        graphics.draw(&self.mesh, world_transform)
+        graphics.draw(&self.mesh, game_object.world_transform())
     }
 }
 
@@ -60,10 +68,18 @@ impl Component for ProceduralMesh {
         self
     }
 
-    fn render(
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn start(&mut self, _scene: &Scene, _game_object: &GameObject) -> bool {
+        true
+    }
+
+    fn update(
         &mut self,
         _scene: &Scene,
-        _world_transform: Transform,
+        _game_object: &GameObject,
         graphics: &mut Graphics,
     ) -> Result<()> {
         graphics.draw_procedural(Arc::clone(&self.material), self.vertices, self.instances)
@@ -89,10 +105,18 @@ impl Component for InstancedMesh {
         self
     }
 
-    fn render(
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn start(&mut self, _scene: &Scene, _game_object: &GameObject) -> bool {
+        true
+    }
+
+    fn update(
         &mut self,
         _scene: &Scene,
-        _world_transform: Transform,
+        _game_object: &GameObject,
         graphics: &mut Graphics,
     ) -> Result<()> {
         graphics.draw_instanced_buffer(&self.mesh, self.instances.clone())
@@ -127,12 +151,12 @@ mod tests {
     #[test]
     fn procedural_mesh_component_queues_its_draw_call() {
         let registry = ComponentRegistry::new();
-        let mut scene = Scene::from_toml("[root]\nname = \"Root\"\n", &registry).unwrap();
-        scene.initialize();
+        let mut scene = Scene::from_yaml("root:\n  name: Root\n", &registry).unwrap();
+        scene.initialize().unwrap();
         let mut graphics = Graphics::default();
         let mut procedural = ProceduralMesh::new(material(), 24, 2).unwrap();
         procedural
-            .render(&scene, Transform::IDENTITY, &mut graphics)
+            .update(&scene, &scene.root, &mut graphics)
             .unwrap();
         let batches = graphics.optimize();
         assert_eq!(batches.len(), 1);

@@ -1,3 +1,0 @@
-pipeline = "assets/pipeline.pipe"
-default_scene = "assets/scenes/game.scene"
-editor_scene = "assets/scenes/editor.scene"

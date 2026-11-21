@@ -11,10 +11,11 @@ license = "MIT"
 anyhow = "1"
 log = "0.4"
 glam = { version = "0.30", features = ["bytemuck", "serde"] }
+cgmath = { version = "0.18", features = ["serde"] }
 bytemuck = { version = "1", features = ["derive"] }
 pretty_env_logger = "0.5"
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+serde_yaml = "0.9.34"
 lalrpop-util = "0.22"
 shaderc = "0.10.1"
 vulkanalia = { version = "=0.35.0", features = ["libloading", "provisional", "window"] }

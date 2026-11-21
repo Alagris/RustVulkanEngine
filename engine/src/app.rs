@@ -193,6 +193,8 @@ impl App {
                 instance.clone(),
                 device.clone(),
                 physical_device,
+                graphics_queue,
+                queue_families.graphics,
                 surface,
                 debug_messenger,
             );
@@ -882,7 +884,10 @@ unsafe fn pick_device(
         let mut graphics = None;
         let mut present = None;
         for (index, properties) in queue_properties.iter().enumerate() {
-            if properties.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
+            if properties
+                .queue_flags
+                .contains(vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE)
+            {
                 graphics = Some(index as u32);
             }
             if instance.get_physical_device_surface_support_khr(
@@ -904,7 +909,7 @@ unsafe fn pick_device(
             }
         }
     }
-    bail!("no Vulkan device supports graphics, presentation, and VK_KHR_swapchain")
+    bail!("no Vulkan device supports graphics, compute, presentation, and VK_KHR_swapchain")
 }
 
 unsafe fn create_image_views(

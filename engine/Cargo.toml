@@ -9,13 +9,18 @@ build = "build.rs"
 anyhow.workspace = true
 log.workspace = true
 glam.workspace = true
+cgmath.workspace = true
 bytemuck.workspace = true
 serde.workspace = true
-toml.workspace = true
+serde_yaml.workspace = true
 lalrpop-util.workspace = true
 shaderc.workspace = true
 vulkanalia.workspace = true
 winit.workspace = true
+fbx-reader = "0.1.0"
 
 [build-dependencies]
 lalrpop = "0.22"
+
+[dev-dependencies]
+fbx-reader = { version = "0.1.0", features = ["write"] }

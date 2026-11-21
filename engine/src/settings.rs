@@ -13,7 +13,7 @@ impl RuntimeSettings {
     pub fn load(path: &Path) -> Result<Self> {
         let text = fs::read_to_string(path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
-        let mut settings: Self = toml::from_str(&text)
+        let mut settings: Self = serde_yaml::from_str(&text)
             .with_context(|| format!("Invalid runtime settings {}", path.display()))?;
         let base = path.parent().unwrap_or_else(|| Path::new("."));
         for asset_path in [&mut settings.pipeline, &mut settings.default_scene] {
