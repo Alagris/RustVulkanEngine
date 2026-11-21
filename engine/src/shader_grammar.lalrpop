@@ -1,6 +1,8 @@
 grammar;
 
-use super::{CullMode, LexError, RenderQueue, ShaderDefinition, ShaderPassMetadata, Token};
+use super::{
+    CullMode, LexError, RenderQueue, ShaderDefinition, ShaderInputLayout, ShaderPassMetadata, Token,
+};
 
 pub Shader: ShaderDefinition = {
     "shader" <quoted_name: "quoted"> "{" <passes: Pass+> "}" => {
@@ -12,19 +14,25 @@ pub Shader: ShaderDefinition = {
 Pass: ShaderPassMetadata = {
     "pass" <quoted_name: "quoted"> "{" <face: Face> <queue: Queue> <hlsl: HlslBlock> "}" => {
         let name = super::unquote(quoted_name);
-        ShaderPassMetadata { name, cull: face, queue, hlsl }
+        ShaderPassMetadata {
+            name,
+            cull: face,
+            queue,
+            hlsl,
+            vertex_inputs: ShaderInputLayout::default(),
+            instance_inputs: ShaderInputLayout::default(),
+        }
     },
 };
 
 Face: CullMode = {
-    "face" "=" "none" ";" => CullMode::None,
-    "face" "=" "front" ";" => CullMode::Front,
-    "face" "=" "back" ";" => CullMode::Back,
+    "face" <value: "quoted"> =>? crate::parsers::material_parser::parse_cull_mode(value)
+        .map_err(|error| lalrpop_util::ParseError::User { error }),
 };
 
 Queue: RenderQueue = {
-    "queue" "=" "opaque" ";" => RenderQueue::Opaque,
-    "queue" "=" "transparent" ";" => RenderQueue::Transparent,
+    "queue" <value: "quoted"> =>? crate::parsers::material_parser::parse_render_queue(value)
+        .map_err(|error| lalrpop_util::ParseError::User { error }),
 };
 
 HlslBlock: String = {
@@ -44,14 +52,7 @@ HlslItem: String = {
     "face" => "face".to_owned(),
     "queue" => "queue".to_owned(),
     "hlsl" => "hlsl".to_owned(),
-    "none" => "none".to_owned(),
-    "front" => "front".to_owned(),
-    "back" => "back".to_owned(),
-    "opaque" => "opaque".to_owned(),
-    "transparent" => "transparent".to_owned(),
     "{" <contents: HlslContents> "}" => format!("{{{}}}", contents),
-    "=" => "=".to_owned(),
-    ";" => ";".to_owned(),
 };
 
 extern {
@@ -64,15 +65,8 @@ extern {
         "face" => Token::Face,
         "queue" => Token::Queue,
         "hlsl" => Token::Hlsl,
-        "none" => Token::None,
-        "front" => Token::Front,
-        "back" => Token::Back,
-        "opaque" => Token::Opaque,
-        "transparent" => Token::Transparent,
         "{" => Token::LBrace,
         "}" => Token::RBrace,
-        "=" => Token::Equals,
-        ";" => Token::Semicolon,
         "identifier" => Token::Identifier(<String>),
         "quoted" => Token::Quoted(<String>),
         "text" => Token::Text(<String>),

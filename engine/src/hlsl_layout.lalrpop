@@ -1,0 +1,50 @@
+grammar;
+
+use crate::parsers::hlsl_parser::{HlslField, HlslLayoutDocument, HlslStruct};
+
+pub HlslLayouts: HlslLayoutDocument = {
+    <items: HlslItem*> => HlslLayoutDocument {
+        structs: items.into_iter().flatten().collect(),
+    }
+};
+
+HlslItem: Option<HlslStruct> = {
+    "struct" <name: "identifier"> "{" <fields: HlslField*> "}" ";" => Some(HlslStruct { name, fields }),
+    <_ignored: HlslIgnored> => None,
+};
+
+HlslField: HlslField = {
+    <hlsl_type: "type"> <name: "identifier"> ":" <semantic: "semantic"> ";" => {
+        HlslField { name, hlsl_type, semantic }
+    },
+};
+
+HlslIgnored: () = {
+    "text" => (),
+    "identifier" => (),
+    "type" => (),
+    "semantic" => (),
+    ":" => (),
+    ";" => (),
+    "{" => (),
+    "}" => (),
+    "=" => (),
+};
+
+extern {
+    type Location = usize;
+    type Error = crate::parsers::hlsl_parser::HlslLayoutLexError;
+
+    enum crate::parsers::hlsl_parser::HlslLayoutToken {
+        "struct" => crate::parsers::hlsl_parser::HlslLayoutToken::Struct,
+        "identifier" => crate::parsers::hlsl_parser::HlslLayoutToken::Identifier(<String>),
+        "type" => crate::parsers::hlsl_parser::HlslLayoutToken::Type(<String>),
+        "semantic" => crate::parsers::hlsl_parser::HlslLayoutToken::Semantic(<String>),
+        "text" => crate::parsers::hlsl_parser::HlslLayoutToken::Text(<String>),
+        "{" => crate::parsers::hlsl_parser::HlslLayoutToken::LBrace,
+        "}" => crate::parsers::hlsl_parser::HlslLayoutToken::RBrace,
+        ":" => crate::parsers::hlsl_parser::HlslLayoutToken::Colon,
+        ";" => crate::parsers::hlsl_parser::HlslLayoutToken::Semicolon,
+        "=" => crate::parsers::hlsl_parser::HlslLayoutToken::Equals,
+    }
+}

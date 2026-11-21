@@ -1,0 +1,31 @@
+[pipeline]
+name = "Forward"
+
+[swapchain]
+image_count = 3
+present_mode = "fifo"
+color_format = "bgra8_srgb"
+
+[render_buffers.depth]
+width = 0
+height = 0
+format = "d32_float"
+
+[render_buffers.shadow]
+width = 2048
+height = 2048
+format = "d32_float"
+shadow_cascades = 4
+
+[[passes]]
+name = "ForwardOpaque"
+material = "cube"
+shader_pass = "Forward"
+color_target = "swapchain"
+clear_color = [0.08, 0.1, 0.14, 1.0]
+
+[[passes]]
+name = "ShadowCascades"
+material = "cube"
+shader_pass = "ShadowCascade"
+color_target = "shadow_cascades"

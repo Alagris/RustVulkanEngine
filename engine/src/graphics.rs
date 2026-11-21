@@ -1,8 +1,10 @@
-use crate::render_pipeline::{CullMode, RenderQueue};
+use crate::material::Material;
+use crate::render_pipeline::{
+    RenderQueue, ShaderInputAttribute, ShaderInputFormat, ShaderInputLayout,
+};
 use anyhow::{Result, anyhow, bail};
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Vec2, Vec3A, Vec4};
-use std::collections::HashMap;
+use glam::{Mat4, Vec3A, Vec4};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,7 +12,6 @@ use vulkanalia::prelude::v1_0::*;
 use vulkanalia::vk::{ExtDebugUtilsExtensionInstanceCommands, KhrSurfaceExtensionInstanceCommands};
 
 static NEXT_MESH_ID: AtomicU64 = AtomicU64::new(1);
-static NEXT_MATERIAL_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
 #[repr(C)]
@@ -19,7 +20,104 @@ pub struct Vertex {
     pub color: Vec4,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VertexLayout {
+    pub stride: u32,
+    pub attributes: Vec<ShaderInputAttribute>,
+}
+
+impl VertexLayout {
+    pub fn new(stride: u32, attributes: Vec<ShaderInputAttribute>) -> Result<Self> {
+        validate_input_layout(stride, &attributes)?;
+        Ok(Self { stride, attributes })
+    }
+
+    fn validate_shader_inputs(&self, expected: &ShaderInputLayout) -> Result<()> {
+        validate_input_layout(self.stride, &self.attributes)?;
+        for input in &expected.attributes {
+            let actual = self
+                .attributes
+                .iter()
+                .find(|attribute| attribute.location == input.location)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "vertex layout is missing shader location {}",
+                        input.location
+                    )
+                })?;
+            if actual.format != input.format || actual.offset != input.offset {
+                bail!(
+                    "vertex layout location {} expects {:?} at byte {}, got {:?} at byte {}",
+                    input.location,
+                    input.format,
+                    input.offset,
+                    actual.format,
+                    actual.offset
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_input_layout(stride: u32, attributes: &[ShaderInputAttribute]) -> Result<()> {
+    if stride == 0 || attributes.is_empty() {
+        bail!("buffer layouts require a positive stride and at least one attribute");
+    }
+    let mut locations = std::collections::HashSet::new();
+    for attribute in attributes {
+        if !locations.insert(attribute.location) {
+            bail!(
+                "buffer layout repeats shader location {}",
+                attribute.location
+            );
+        }
+        let end = attribute
+            .offset
+            .checked_add(attribute.format.byte_size())
+            .ok_or_else(|| anyhow!("buffer attribute range overflow"))?;
+        if end > stride {
+            bail!(
+                "buffer attribute at location {} extends beyond its stride",
+                attribute.location
+            );
+        }
+    }
+    Ok(())
+}
+
+impl Vertex {
+    pub fn layout() -> VertexLayout {
+        VertexLayout {
+            stride: std::mem::size_of::<Self>() as u32,
+            attributes: vec![
+                ShaderInputAttribute {
+                    location: 0,
+                    format: ShaderInputFormat::Float32x3,
+                    offset: std::mem::offset_of!(Self, position) as u32,
+                },
+                ShaderInputAttribute {
+                    location: 1,
+                    format: ShaderInputFormat::Float32x4,
+                    offset: std::mem::offset_of!(Self, color) as u32,
+                },
+            ],
+        }
+    }
+}
+
 pub type Transform = Mat4;
+
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+#[repr(C)]
+pub struct FrameUniform {
+    pub view_projection: [[f32; 4]; 4],
+    pub view: [[f32; 4]; 4],
+    pub shadow_view_projection: [[[f32; 4]; 4]; 4],
+    pub cascade_splits: [f32; 4],
+    pub cascade_index: u32,
+    pub padding: [u32; 3],
+}
 
 pub(crate) struct GpuContextInner {
     _entry: Entry,
@@ -112,6 +210,19 @@ impl<T: Pod> Clone for Buffer<T> {
 
 impl<T: Pod> Buffer<T> {
     fn new(context: &GpuContext, values: &[T], usage: vk::BufferUsageFlags) -> Result<Self> {
+        assert!(
+            std::mem::size_of::<T>() > 0,
+            "GPU element types must be sized"
+        );
+        assert!(
+            matches!(
+                usage,
+                vk::BufferUsageFlags::VERTEX_BUFFER
+                    | vk::BufferUsageFlags::INDEX_BUFFER
+                    | vk::BufferUsageFlags::UNIFORM_BUFFER
+            ),
+            "GPU buffer wrapper only permits typed vertex, index, or uniform usage"
+        );
         if values.is_empty() {
             bail!("GPU buffers cannot be empty");
         }
@@ -190,6 +301,14 @@ impl<T: Pod> Buffer<T> {
     }
 
     pub fn update(&self, offset: usize, values: &[T]) -> Result<()> {
+        assert!(
+            offset <= self.len,
+            "update offset must be within element capacity"
+        );
+        assert!(
+            values.len() <= self.len - offset,
+            "update range must be within element capacity"
+        );
         let end = offset
             .checked_add(values.len())
             .ok_or_else(|| anyhow!("GPU buffer update range overflow"))?;
@@ -224,6 +343,26 @@ impl<T: Pod> Buffer<T> {
     }
 }
 
+pub struct UniformBuffer<T: Pod>(Buffer<T>);
+
+impl<T: Pod> UniformBuffer<T> {
+    pub fn new(context: &GpuContext, value: T) -> Result<Self> {
+        Ok(Self(Buffer::new(
+            context,
+            &[value],
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+        )?))
+    }
+
+    pub fn update(&self, value: T) -> Result<()> {
+        self.0.update(0, &[value])
+    }
+
+    pub(crate) fn handle(&self) -> vk::Buffer {
+        self.0.handle()
+    }
+}
+
 pub trait ComputeBuffer {
     type Element: Pod;
     fn len(&self) -> usize;
@@ -234,29 +373,62 @@ pub trait ComputeBuffer {
 }
 
 #[derive(Clone)]
-pub struct VertexBuffer(Buffer<Vertex>);
+pub struct VertexBuffer {
+    buffer: Buffer<u8>,
+    pub layout: VertexLayout,
+    vertex_count: usize,
+}
 
 impl VertexBuffer {
     pub fn new(context: &GpuContext, vertices: &[Vertex]) -> Result<Self> {
-        Ok(Self(Buffer::new(
+        Self::with_raw_data(
             context,
-            vertices,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-        )?))
+            bytemuck::cast_slice(vertices),
+            vertices.len(),
+            Vertex::layout(),
+        )
+    }
+
+    pub fn with_raw_data(
+        context: &GpuContext,
+        bytes: &[u8],
+        vertex_count: usize,
+        layout: VertexLayout,
+    ) -> Result<Self> {
+        validate_input_layout(layout.stride, &layout.attributes)?;
+        let expected_bytes = (layout.stride as usize)
+            .checked_mul(vertex_count)
+            .ok_or_else(|| anyhow!("vertex buffer size overflow"))?;
+        if vertex_count == 0 || bytes.len() != expected_bytes {
+            bail!("vertex bytes must exactly match the declared layout and vertex count");
+        }
+        Ok(Self {
+            buffer: Buffer::new(context, bytes, vk::BufferUsageFlags::VERTEX_BUFFER)?,
+            layout,
+            vertex_count,
+        })
     }
 
     pub(crate) fn handle(&self) -> vk::Buffer {
-        self.0.handle()
+        self.buffer.handle()
+    }
+
+    pub fn vertex_count(&self) -> usize {
+        self.vertex_count
+    }
+
+    pub fn update_bytes(&self, byte_offset: usize, bytes: &[u8]) -> Result<()> {
+        self.buffer.update(byte_offset, bytes)
     }
 }
 
 impl ComputeBuffer for VertexBuffer {
-    type Element = Vertex;
+    type Element = u8;
     fn len(&self) -> usize {
-        self.0.len()
+        self.buffer.len()
     }
-    fn update(&self, offset: usize, values: &[Vertex]) -> Result<()> {
-        self.0.update(offset, values)
+    fn update(&self, offset: usize, values: &[u8]) -> Result<()> {
+        self.buffer.update(offset, values)
     }
 }
 
@@ -288,9 +460,24 @@ impl ComputeBuffer for IndexBuffer {
 }
 
 /// Instance data must contain the same four-column matrix layout consumed by the renderer.
-pub trait InstanceData: Pod + Send + Sync + 'static {}
+pub trait InstanceData: Pod + Send + Sync + 'static {
+    fn layout() -> VertexLayout;
+}
 
-impl InstanceData for Mat4 {}
+impl InstanceData for Mat4 {
+    fn layout() -> VertexLayout {
+        VertexLayout {
+            stride: std::mem::size_of::<Self>() as u32,
+            attributes: (0..4)
+                .map(|column| ShaderInputAttribute {
+                    location: 2 + column,
+                    format: ShaderInputFormat::Float32x4,
+                    offset: column * 16,
+                })
+                .collect(),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct InstanceBufferHandle {
@@ -309,24 +496,29 @@ impl InstanceBufferHandle {
 }
 
 #[derive(Clone)]
-pub struct InstanceBuffer<T: InstanceData>(Buffer<T>);
+pub struct InstanceBuffer<T: InstanceData> {
+    buffer: Buffer<T>,
+    layout: VertexLayout,
+}
 
 impl<T: InstanceData> InstanceBuffer<T> {
     pub fn new(context: &GpuContext, instances: &[T]) -> Result<Self> {
-        if std::mem::size_of::<T>() != std::mem::size_of::<Mat4>() {
-            bail!("instance data must use the 64-byte matrix layout expected by the shader");
+        assert!(!instances.is_empty(), "instance buffers must not be empty");
+        let layout = T::layout();
+        validate_input_layout(layout.stride, &layout.attributes)?;
+        if layout.stride as usize != std::mem::size_of::<T>() {
+            bail!("instance layout stride must equal the instance element size");
         }
-        Ok(Self(Buffer::new(
-            context,
-            instances,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-        )?))
+        Ok(Self {
+            buffer: Buffer::new(context, instances, vk::BufferUsageFlags::VERTEX_BUFFER)?,
+            layout,
+        })
     }
 
     pub(crate) fn erase(&self) -> InstanceBufferHandle {
         InstanceBufferHandle {
-            allocation: Arc::clone(&self.0.allocation),
-            len: self.0.len,
+            allocation: Arc::clone(&self.buffer.allocation),
+            len: self.buffer.len,
         }
     }
 }
@@ -334,10 +526,10 @@ impl<T: InstanceData> InstanceBuffer<T> {
 impl<T: InstanceData> ComputeBuffer for InstanceBuffer<T> {
     type Element = T;
     fn len(&self) -> usize {
-        self.0.len()
+        self.buffer.len()
     }
     fn update(&self, offset: usize, values: &[T]) -> Result<()> {
-        self.0.update(offset, values)
+        self.buffer.update(offset, values)
     }
 }
 
@@ -365,6 +557,7 @@ impl Mesh {
         materials: Vec<Arc<Material>>,
         submeshes: Vec<Submesh>,
     ) -> Result<Self> {
+        assert!(context.device().handle() != vk::Device::null());
         if vertices.is_empty() || indices.is_empty() || materials.is_empty() || submeshes.is_empty()
         {
             bail!("meshes require vertices, indices, materials, and submeshes");
@@ -374,6 +567,34 @@ impl Mesh {
             .any(|&index| index as usize >= vertices.len())
         {
             bail!("mesh index is outside the vertex array");
+        }
+        let vertex_buffer = VertexBuffer::new(context, vertices)?;
+        let index_buffer = IndexBuffer::new(context, indices)?;
+        Self::from_buffers(
+            vertex_buffer,
+            index_buffer,
+            materials,
+            submeshes,
+            <Mat4 as InstanceData>::layout(),
+        )
+    }
+
+    pub fn from_buffers(
+        vertices: VertexBuffer,
+        indices: IndexBuffer,
+        materials: Vec<Arc<Material>>,
+        submeshes: Vec<Submesh>,
+        instance_layout: VertexLayout,
+    ) -> Result<Self> {
+        if vertices.vertex_count() == 0
+            || indices.len() == 0
+            || materials.is_empty()
+            || submeshes.is_empty()
+        {
+            bail!("meshes require vertices, indices, materials, and submeshes");
+        }
+        for material in &materials {
+            Self::validate_material_layouts(material, &vertices.layout, &instance_layout)?;
         }
         for submesh in &submeshes {
             let end = submesh
@@ -389,71 +610,63 @@ impl Mesh {
         }
         Ok(Self {
             id: NEXT_MESH_ID.fetch_add(1, Ordering::Relaxed),
-            vertices: VertexBuffer::new(context, vertices)?,
-            indices: IndexBuffer::new(context, indices)?,
+            vertices,
+            indices,
             materials,
             submeshes,
         })
     }
 
-    pub fn id(&self) -> u64 {
-        self.id
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum UniformValue {
-    Float(f32),
-    Int(i32),
-    Vec2(Vec2),
-    Vec3(glam::Vec3),
-    Vec4(Vec4),
-    Mat4(Mat4),
-}
-
-#[derive(Clone, Debug)]
-pub struct ShaderPass {
-    pub name: String,
-    pub vertex_entry: String,
-    pub fragment_entry: String,
-    pub vertex_spirv: Arc<[u32]>,
-    pub fragment_spirv: Arc<[u32]>,
-    pub cull: CullMode,
-    pub queue: RenderQueue,
-}
-
-#[derive(Clone, Debug)]
-pub struct Material {
-    id: u64,
-    pub passes: Vec<ShaderPass>,
-    uniforms: HashMap<String, UniformValue>,
-}
-
-impl Material {
-    pub fn new(passes: Vec<ShaderPass>) -> Result<Self> {
-        if passes.is_empty() {
-            bail!("materials require at least one compiled shader pass");
+    fn validate_material_layouts(
+        material: &Material,
+        vertex_layout: &VertexLayout,
+        instance_layout: &VertexLayout,
+    ) -> Result<()> {
+        let expected_vertex_stride = material
+            .passes
+            .iter()
+            .map(|pass| pass.vertex_inputs.stride)
+            .max()
+            .unwrap_or(0);
+        let expected_instance_stride = material
+            .passes
+            .iter()
+            .map(|pass| pass.instance_inputs.stride)
+            .max()
+            .unwrap_or(0);
+        if expected_vertex_stride != vertex_layout.stride {
+            bail!(
+                "mesh vertex stride {} does not match material '{}' stride {}",
+                vertex_layout.stride,
+                material.id(),
+                expected_vertex_stride
+            );
         }
-        Ok(Self {
-            id: NEXT_MATERIAL_ID.fetch_add(1, Ordering::Relaxed),
-            passes,
-            uniforms: HashMap::new(),
-        })
-    }
-    pub fn id(&self) -> u64 {
-        self.id
-    }
-    pub fn set_uniform(&mut self, name: impl Into<String>, value: UniformValue) -> Result<()> {
-        let name = name.into();
-        if name.trim().is_empty() {
-            bail!("uniform name must not be empty");
+        if expected_instance_stride != instance_layout.stride {
+            bail!(
+                "mesh instance stride {} does not match material '{}' stride {}",
+                instance_layout.stride,
+                material.id(),
+                expected_instance_stride
+            );
         }
-        self.uniforms.insert(name, value);
+        for pass in &material.passes {
+            vertex_layout.validate_shader_inputs(&pass.vertex_inputs)?;
+            instance_layout.validate_shader_inputs(&pass.instance_inputs)?;
+        }
         Ok(())
     }
-    pub fn uniform(&self, name: &str) -> Option<&UniformValue> {
-        self.uniforms.get(name)
+
+    pub fn id(&self) -> u64 {
+        self.id
     }
+}
+
+fn validate_material_layouts_for_draw(mesh: &Mesh, instance_layout: &VertexLayout) -> Result<()> {
+    for material in &mesh.materials {
+        Mesh::validate_material_layouts(material, &mesh.vertices.layout, instance_layout)?;
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -529,7 +742,16 @@ pub struct Graphics {
 }
 
 impl Graphics {
-    pub fn draw(&mut self, mesh: &Mesh, transform: Transform) {
+    pub fn draw(&mut self, mesh: &Mesh, transform: Transform) -> Result<()> {
+        assert!(
+            transform.is_finite() && transform.determinant().abs() > f32::EPSILON,
+            "draw transforms must be finite and invertible"
+        );
+        assert!(
+            !mesh.submeshes.is_empty(),
+            "draw mesh must contain submeshes"
+        );
+        validate_material_layouts_for_draw(mesh, &<Mat4 as InstanceData>::layout())?;
         let mesh = Arc::new(mesh.clone());
         for submesh_index in 0..mesh.submeshes.len() {
             self.queued.push(DrawCommand::Mesh {
@@ -538,6 +760,7 @@ impl Graphics {
                 transforms: vec![transform],
             });
         }
+        Ok(())
     }
     pub fn draw_procedural(
         &mut self,
@@ -555,9 +778,22 @@ impl Graphics {
         });
         Ok(())
     }
-    pub fn draw_instanced<T: InstanceData>(&mut self, mesh: &Mesh, instances: &InstanceBuffer<T>) {
+    pub fn draw_instanced<T: InstanceData>(
+        &mut self,
+        mesh: &Mesh,
+        instances: &InstanceBuffer<T>,
+    ) -> Result<()> {
+        assert!(
+            !mesh.submeshes.is_empty(),
+            "instanced draw mesh must contain submeshes"
+        );
+        assert!(instances.len() > 0, "instanced draw must contain instances");
         if instances.is_empty() {
-            return;
+            bail!("instanced draw must contain at least one instance");
+        }
+        validate_material_layouts_for_draw(mesh, &instances.layout)?;
+        for material in &mesh.materials {
+            Mesh::validate_material_layouts(material, &mesh.vertices.layout, &instances.layout)?;
         }
         let mesh = Arc::new(mesh.clone());
         let instances = instances.erase();
@@ -568,6 +804,7 @@ impl Graphics {
                 instances: instances.clone(),
             });
         }
+        Ok(())
     }
     pub(crate) fn optimize(&mut self) -> Vec<DrawBatch> {
         let mut opaque = Vec::new();
@@ -590,10 +827,23 @@ impl Graphics {
                 });
             if merge {
                 if let DrawCommand::Mesh { transforms, .. } = command {
+                    assert!(
+                        !batches.is_empty(),
+                        "mergeable batch must have a preceding batch"
+                    );
+                    let batch = match batches.last_mut() {
+                        Some(batch) => batch,
+                        None => unreachable!("preceding mergeable batch was asserted"),
+                    };
+                    assert_eq!(
+                        batch.commands.len(),
+                        1,
+                        "mergeable mesh batch must contain exactly one source command"
+                    );
                     if let DrawCommand::Mesh {
                         transforms: previous,
                         ..
-                    } = &mut batches.last_mut().unwrap().commands[0]
+                    } = &mut batch.commands[0]
                     {
                         previous.extend(transforms);
                     }
@@ -605,31 +855,5 @@ impl Graphics {
             }
         }
         batches
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn material_uniforms_are_readable_by_name() {
-        let mut material = Material::new(vec![ShaderPass {
-            name: "Forward".to_owned(),
-            vertex_entry: "VSMain".to_owned(),
-            fragment_entry: "PSMain".to_owned(),
-            vertex_spirv: Arc::from([]),
-            fragment_spirv: Arc::from([]),
-            cull: CullMode::Back,
-            queue: RenderQueue::Opaque,
-        }])
-        .unwrap();
-        material
-            .set_uniform("roughness", UniformValue::Float(0.5))
-            .unwrap();
-        assert_eq!(
-            material.uniform("roughness"),
-            Some(&UniformValue::Float(0.5))
-        );
     }
 }

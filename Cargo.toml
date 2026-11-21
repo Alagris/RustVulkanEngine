@@ -1,27 +1,21 @@
-[package]
-name = "Game"
+[workspace]
+members = ["engine", "editor", "game"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
-[dependencies]
+[workspace.dependencies]
 anyhow = "1"
 log = "0.4"
 glam = { version = "0.30", features = ["bytemuck"] }
 bytemuck = { version = "1", features = ["derive"] }
-png = "0.18"
-rayon = "1.12.0"
 pretty_env_logger = "0.5"
-thiserror = "1"
-tobj = { version = "3", features = ["log"] }
-vulkanalia = { version = "=0.35.0", features = ["libloading", "provisional", "window"] }
-winit = "0.29"
-rapier2d = { version = "0.33.0", features = [ "simd-stable", "parallel" ] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 lalrpop-util = "0.22"
-
-[build-dependencies]
-lalrpop = "0.22"
-
-[env]
-RUST_LOG = "debug"
+shaderc = "0.10.1"
+vulkanalia = { version = "=0.35.0", features = ["libloading", "provisional", "window"] }
+winit = "0.29"

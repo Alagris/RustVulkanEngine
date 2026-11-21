@@ -1,17 +1,18 @@
 use anyhow::{Context, Result, anyhow, bail};
-use serde::Deserialize;
+use shaderc::{CompileOptions, Compiler, EnvVersion, ShaderKind, SourceLanguage, TargetEnv};
 use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 
-lalrpop_util::lalrpop_mod!(pub shader_grammar);
+lalrpop_util::lalrpop_mod!(shader_grammar);
 
 #[derive(Clone, Debug)]
 pub struct RenderPipeline {
     pub name: String,
     pub passes: Vec<RenderPass>,
-    output_dir: PathBuf,
+    pub swapchain: SwapchainSettings,
+    pub render_buffers: RenderBufferSettings,
+    pub(crate) output_dir: PathBuf,
 }
 
 #[derive(Clone, Debug)]
@@ -19,9 +20,52 @@ pub struct RenderPass {
     pub name: String,
     pub shader: PathBuf,
     pub shader_name: String,
+    pub material: PathBuf,
+    pub material_name: String,
     pub color_target: String,
     pub clear_color: Option<[f32; 4]>,
     pub metadata: ShaderPassMetadata,
+}
+
+#[derive(Clone, Debug)]
+pub struct SwapchainSettings {
+    pub image_count: u32,
+    pub present_mode: PresentMode,
+    pub color_format: ColorFormat,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresentMode {
+    Fifo,
+    Mailbox,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColorFormat {
+    Bgra8Srgb,
+    Rgba8Srgb,
+    Bgra8Unorm,
+}
+
+#[derive(Clone, Debug)]
+pub struct RenderBufferSettings {
+    pub depth: BufferSettings,
+    pub shadow: BufferSettings,
+    pub shadow_cascades: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DepthFormat {
+    D32Float,
+    D32FloatS8,
+    D24UnormS8,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct BufferSettings {
+    pub width: u32,
+    pub height: u32,
+    pub format: DepthFormat,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,32 +87,67 @@ pub struct ShaderPassMetadata {
     pub queue: RenderQueue,
     pub cull: CullMode,
     pub hlsl: String,
+    pub vertex_inputs: ShaderInputLayout,
+    pub instance_inputs: ShaderInputLayout,
 }
 
-#[derive(Deserialize)]
-struct PipelineFile {
-    pipeline: PipelineSettings,
-    passes: Vec<PassSettings>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShaderInputFormat {
+    Float32,
+    Float32x2,
+    Float32x3,
+    Float32x4,
+    Sint32,
+    Sint32x2,
+    Sint32x3,
+    Sint32x4,
+    Uint32,
+    Uint32x2,
+    Uint32x3,
+    Uint32x4,
 }
 
-#[derive(Deserialize)]
-struct PipelineSettings {
-    name: String,
+impl ShaderInputFormat {
+    pub fn byte_size(self) -> u32 {
+        match self {
+            Self::Float32 | Self::Sint32 | Self::Uint32 => 4,
+            Self::Float32x2 | Self::Sint32x2 | Self::Uint32x2 => 8,
+            Self::Float32x3 | Self::Sint32x3 | Self::Uint32x3 => 12,
+            Self::Float32x4 | Self::Sint32x4 | Self::Uint32x4 => 16,
+        }
+    }
+
+    pub(crate) fn alignment(self) -> u32 {
+        match self {
+            Self::Float32 | Self::Sint32 | Self::Uint32 => 4,
+            Self::Float32x2 | Self::Sint32x2 | Self::Uint32x2 => 8,
+            Self::Float32x3
+            | Self::Float32x4
+            | Self::Sint32x3
+            | Self::Sint32x4
+            | Self::Uint32x3
+            | Self::Uint32x4 => 16,
+        }
+    }
 }
 
-#[derive(Deserialize)]
-struct PassSettings {
-    name: String,
-    shader: PathBuf,
-    shader_pass: String,
-    color_target: String,
-    clear_color: Option<[f32; 4]>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShaderInputAttribute {
+    pub location: u32,
+    pub format: ShaderInputFormat,
+    pub offset: u32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ShaderInputLayout {
+    pub stride: u32,
+    pub attributes: Vec<ShaderInputAttribute>,
 }
 
 #[derive(Debug)]
-pub(super) struct ShaderDefinition {
-    name: String,
-    passes: Vec<ShaderPassMetadata>,
+pub(crate) struct ShaderDefinition {
+    pub(crate) name: String,
+    pub(crate) passes: Vec<ShaderPassMetadata>,
 }
 
 #[derive(Clone, Debug)]
@@ -78,15 +157,8 @@ pub(crate) enum Token {
     Face,
     Queue,
     Hlsl,
-    None,
-    Front,
-    Back,
-    Opaque,
-    Transparent,
     LBrace,
     RBrace,
-    Equals,
-    Semicolon,
     Identifier(String),
     Quoted(String),
     Text(String),
@@ -94,8 +166,8 @@ pub(crate) enum Token {
 
 #[derive(Clone, Debug)]
 pub(crate) struct LexError {
-    offset: usize,
-    message: String,
+    pub(crate) offset: usize,
+    pub(crate) message: String,
 }
 
 impl std::fmt::Display for LexError {
@@ -249,11 +321,6 @@ impl Iterator for ShaderLexer<'_> {
                     "face" => Token::Face,
                     "queue" => Token::Queue,
                     "hlsl" => Token::Hlsl,
-                    "none" => Token::None,
-                    "front" => Token::Front,
-                    "back" => Token::Back,
-                    "opaque" => Token::Opaque,
-                    "transparent" => Token::Transparent,
                     _ => Token::Identifier(word.to_owned()),
                 }
             } else {
@@ -278,8 +345,6 @@ impl Iterator for ShaderLexer<'_> {
                         }
                         Token::RBrace
                     }
-                    '=' => Token::Equals,
-                    ';' => Token::Semicolon,
                     _ if self.in_hlsl => Token::Text(character.to_string()),
                     _ => {
                         return Some(Err(LexError {
@@ -300,11 +365,6 @@ impl Iterator for ShaderLexer<'_> {
                     Token::Face => Token::Text("face".to_owned()),
                     Token::Queue => Token::Text("queue".to_owned()),
                     Token::Hlsl => Token::Text("hlsl".to_owned()),
-                    Token::None => Token::Text("none".to_owned()),
-                    Token::Front => Token::Text("front".to_owned()),
-                    Token::Back => Token::Text("back".to_owned()),
-                    Token::Opaque => Token::Text("opaque".to_owned()),
-                    Token::Transparent => Token::Text("transparent".to_owned()),
                     token => token,
                 }
             } else {
@@ -317,130 +377,64 @@ impl Iterator for ShaderLexer<'_> {
 }
 
 impl RenderPipeline {
-    pub fn load(path: &Path) -> Result<Self> {
-        let source = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read render pipeline {}", path.display()))?;
-        let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
-        Self::from_toml(&source, base_dir)
-            .with_context(|| format!("Invalid render pipeline {}", path.display()))
-    }
-
-    fn from_toml(source: &str, base_dir: &Path) -> Result<Self> {
-        let config: PipelineFile = toml::from_str(source).context("Failed to parse TOML")?;
-        if config.pipeline.name.trim().is_empty() {
-            bail!("pipeline.name must not be empty");
-        }
-        if config.passes.is_empty() {
-            bail!("pipeline must contain at least one [[passes]] entry");
-        }
-
-        let mut names = HashSet::new();
-        let mut passes = Vec::with_capacity(config.passes.len());
-        for settings in config.passes {
-            if settings.name.trim().is_empty() || !names.insert(settings.name.clone()) {
-                bail!(
-                    "render pass names must be non-empty and unique: '{}'",
-                    settings.name
-                );
-            }
-            if settings.shader_pass.trim().is_empty() || settings.color_target.trim().is_empty() {
-                bail!(
-                    "render pass '{}' has an empty shader pass or target",
-                    settings.name
-                );
-            }
-            if let Some(color) = settings.clear_color {
-                if color
-                    .iter()
-                    .any(|component| !component.is_finite() || !(0.0..=1.0).contains(component))
-                {
-                    bail!(
-                        "render pass '{}' clear_color values must be finite and between 0 and 1",
-                        settings.name
-                    );
-                }
-            }
-
-            let shader_path = base_dir.join(&settings.shader);
-            let shader_source = fs::read_to_string(&shader_path)
-                .with_context(|| format!("Failed to read shader {}", shader_path.display()))?;
-            let shader = parse_shader_definition(&shader_source)
-                .with_context(|| format!("Invalid shader {}", shader_path.display()))?;
-            let metadata = shader
-                .passes
-                .into_iter()
-                .find(|shader_pass| shader_pass.name == settings.shader_pass)
-                .ok_or_else(|| {
-                    anyhow!(
-                        "render pass '{}' selects shader pass '{}', but it is not declared in {}",
-                        settings.name,
-                        settings.shader_pass,
-                        shader_path.display()
-                    )
-                })?;
-
-            passes.push(RenderPass {
-                name: settings.name,
-                shader: shader_path,
-                shader_name: shader.name,
-                color_target: settings.color_target,
-                clear_color: settings.clear_color,
-                metadata,
-            });
-        }
-
-        Ok(Self {
-            name: config.pipeline.name,
-            passes,
-            output_dir: base_dir.join("compiled_shaders"),
-        })
-    }
-
     pub fn compile_shaders(&self) -> Result<()> {
+        assert!(
+            !self.passes.is_empty(),
+            "validated pipeline must contain render passes"
+        );
         fs::create_dir_all(&self.output_dir).with_context(|| {
             format!(
                 "Failed to create shader output directory {}",
                 self.output_dir.display()
             )
         })?;
-        let dxc = std::env::var_os("DXC").unwrap_or_else(|| "dxc".into());
-
+        let compiler = Compiler::new().context("Failed to initialize embedded shaderc compiler")?;
         for (index, pass) in self.passes.iter().enumerate() {
-            let source_path = self.output_dir.join(format!("pass_{index}.hlsl"));
-            fs::write(&source_path, &pass.metadata.hlsl)
-                .with_context(|| format!("Failed to write {}", source_path.display()))?;
-
-            for (stage, profile, entry) in
-                [("vert", "vs_6_0", "VSMain"), ("frag", "ps_6_0", "PSMain")]
-            {
+            assert!(
+                !pass.metadata.hlsl.trim().is_empty(),
+                "parsed HLSL pass must not be empty"
+            );
+            let source_path = pass.shader.display().to_string();
+            for (stage, shader_kind, entry) in [
+                ("vert", ShaderKind::Vertex, "VSMain"),
+                ("frag", ShaderKind::Fragment, "PSMain"),
+            ] {
                 let output = self.output_dir.join(format!("pass_{index}.{stage}.spv"));
-                let result = Command::new(&dxc)
-                    .arg("-spirv")
-                    .arg("-T")
-                    .arg(profile)
-                    .arg("-E")
-                    .arg(entry)
-                    .arg("-fspv-target-env=vulkan1.0")
-                    .arg("-Fo")
-                    .arg(&output)
-                    .arg(&source_path)
-                    .output()
-                    .with_context(|| {
-                        format!(
-                            "Failed to run DXC ('{}'); install DirectX Shader Compiler or set DXC",
-                            Path::new(&dxc).display()
+                let mut options = CompileOptions::new()
+                    .context("Failed to initialize embedded shaderc compile options")?;
+                options.set_source_language(SourceLanguage::HLSL);
+                options.set_target_env(TargetEnv::Vulkan, EnvVersion::Vulkan1_0 as u32);
+                options.set_hlsl_io_mapping(true);
+                options.set_auto_map_locations(true);
+                options.set_auto_bind_uniforms(true);
+                let artifact = compiler
+                    .compile_into_spirv(
+                        &pass.metadata.hlsl,
+                        shader_kind,
+                        &source_path,
+                        entry,
+                        Some(&options),
+                    )
+                    .map_err(|error| {
+                        anyhow!(
+                            "Embedded HLSL compilation failed for pass '{}' ({stage}): {error}",
+                            pass.name
                         )
                     })?;
-                if !result.status.success() {
-                    bail!(
-                        "DXC failed compiling pass '{}' {} shader:\n{}",
-                        pass.name,
-                        stage,
-                        String::from_utf8_lossy(&result.stderr)
-                    );
-                }
+                assert!(
+                    !artifact.as_binary().is_empty(),
+                    "shaderc emitted an empty SPIR-V module"
+                );
+                assert_eq!(
+                    artifact.as_binary().first(),
+                    Some(&0x0723_0203),
+                    "shaderc output must have the SPIR-V magic number"
+                );
+                fs::write(&output, artifact.as_binary_u8()).with_context(|| {
+                    format!("Failed to write SPIR-V module {}", output.display())
+                })?;
                 log::info!(
-                    "Compiled {} shader for pass '{}' to {}.",
+                    "Compiled {} shader for pass '{}' with embedded shaderc to {}.",
                     stage,
                     pass.name,
                     output.display()
@@ -451,20 +445,25 @@ impl RenderPipeline {
     }
 }
 
-fn parse_shader_definition(source: &str) -> Result<ShaderDefinition> {
-    let shader = shader_grammar::ShaderParser::new()
+pub(crate) fn parse_shader_definition(source: &str) -> Result<ShaderDefinition> {
+    let mut shader = shader_grammar::ShaderParser::new()
         .parse(ShaderLexer::new(source))
         .map_err(|error| anyhow!("{error}"))?;
     let mut names = HashSet::new();
-    for pass in &shader.passes {
+    for pass in &mut shader.passes {
         if !names.insert(&pass.name) {
             bail!("shader pass names must be unique: '{}'", pass.name);
         }
+        let (vertex_inputs, instance_inputs) =
+            crate::parsers::hlsl_parser::parse_input_layouts(&pass.hlsl)
+                .with_context(|| format!("Invalid input layout in shader pass '{}'", pass.name))?;
+        pass.vertex_inputs = vertex_inputs;
+        pass.instance_inputs = instance_inputs;
     }
     Ok(shader)
 }
 
-fn unquote(value: String) -> String {
+pub(super) fn unquote(value: String) -> String {
     let mut chars = value[1..value.len() - 1].chars();
     let mut decoded = String::new();
     while let Some(character) = chars.next() {
@@ -489,27 +488,51 @@ fn unquote(value: String) -> String {
 mod tests {
     use super::*;
 
-    fn sample_pipeline() -> RenderPipeline {
-        RenderPipeline::load(
-            &Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets")
-                .join("pipeline.toml"),
-        )
-        .unwrap()
+    fn temporary_directory(name: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("engine-{name}-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        directory
     }
 
     #[test]
-    fn loads_shader_and_multiple_passes() {
-        let pipeline = sample_pipeline();
-        assert_eq!(pipeline.name, "Forward");
-        assert_eq!(pipeline.passes.len(), 2);
-        assert_eq!(pipeline.passes[0].shader_name, "Unlit");
-        assert_eq!(pipeline.passes[0].metadata.name, "Forward");
-        assert_eq!(pipeline.passes[0].metadata.cull, CullMode::Back);
-        assert_eq!(pipeline.passes[0].metadata.queue, RenderQueue::Opaque);
-        assert!(pipeline.passes[0].metadata.hlsl.contains("VSMain"));
-        assert_eq!(pipeline.passes[1].metadata.name, "ShadowCaster");
-        assert_eq!(pipeline.passes[1].metadata.cull, CullMode::Front);
+    fn parses_multiple_shader_passes_with_quoted_metadata() {
+        let source = r#"
+shader "Test" {
+    pass "Forward" {
+        face "back"
+        queue "opaque"
+        hlsl {
+            struct VertexInput { float3 position : POSITION; };
+            float4 VSMain(VertexInput input) : SV_Position { return 0; }
+            float4 PSMain() : SV_Target0 { return 1; }
+        }
+    }
+    pass "Shadow" {
+        face "front"
+        queue "transparent"
+        hlsl {
+            struct VertexInput { float3 position : POSITION; };
+            float4 VSMain(VertexInput input) : SV_Position { return 0; }
+            float4 PSMain() : SV_Target0 { return 1; }
+        }
+    }
+}
+"#;
+        let shader = parse_shader_definition(source).unwrap();
+        assert_eq!(shader.name, "Test");
+        assert_eq!(shader.passes.len(), 2);
+        assert_eq!(shader.passes[0].name, "Forward");
+        assert_eq!(shader.passes[0].cull, CullMode::Back);
+        assert_eq!(shader.passes[0].queue, RenderQueue::Opaque);
+        assert_eq!(shader.passes[0].vertex_inputs.stride, 16);
+        assert_eq!(shader.passes[1].name, "Shadow");
+        assert_eq!(shader.passes[1].cull, CullMode::Front);
+        assert_eq!(shader.passes[1].queue, RenderQueue::Transparent);
     }
 
     #[test]
@@ -517,9 +540,10 @@ mod tests {
         let source = r#"
 shader "Test" {
     pass "Nested" {
-        face = back;
-        queue = opaque;
+        face "back"
+        queue "opaque"
         hlsl {
+            struct VertexInput { float3 position : POSITION; };
             float4 VSMain() {
                 const char* text = "}";
                 // }
@@ -541,10 +565,10 @@ shader "Test" {
         let source = r#"
 shader "Test" {
     pass "Forward" {
-        face = back;
-        face = front;
-        queue = opaque;
-        hlsl { float4 VSMain() { return 0; } }
+        face "back"
+        face "front"
+        queue "opaque"
+        hlsl { struct VertexInput { float3 position : POSITION; }; }
     }
 }
 "#;
@@ -553,14 +577,32 @@ shader "Test" {
 
     #[test]
     fn rejects_missing_pass_in_pipeline() {
-        let base_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+        let base_dir = temporary_directory("missing-pass");
+        fs::write(
+            base_dir.join("cube.mat"),
+            "[material]\nname = \"Cube\"\nshader = \"shader.shader\"\n",
+        )
+        .unwrap();
+        fs::write(
+            base_dir.join("shader.shader"),
+            r#"
+shader "Test" {
+    pass "Forward" {
+        face "back"
+        queue "opaque"
+        hlsl { struct VertexInput { float3 position : POSITION; }; }
+    }
+}
+"#,
+        )
+        .unwrap();
         let source = r#"
 [pipeline]
 name = "Invalid"
 
 [[passes]]
 name = "Missing"
-shader = "shaders/unlit.shader"
+material = "cube.mat"
 shader_pass = "NotDeclared"
 color_target = "swapchain"
 "#;
@@ -570,5 +612,6 @@ color_target = "swapchain"
                 .to_string()
                 .contains("not declared")
         );
+        fs::remove_dir_all(base_dir).unwrap();
     }
 }
