@@ -1,0 +1,80 @@
+grammar;
+
+use super::{CullMode, LexError, RenderQueue, ShaderDefinition, ShaderPassMetadata, Token};
+
+pub Shader: ShaderDefinition = {
+    "shader" <quoted_name: "quoted"> "{" <passes: Pass+> "}" => {
+        let name = super::unquote(quoted_name);
+        ShaderDefinition { name, passes }
+    },
+};
+
+Pass: ShaderPassMetadata = {
+    "pass" <quoted_name: "quoted"> "{" <face: Face> <queue: Queue> <hlsl: HlslBlock> "}" => {
+        let name = super::unquote(quoted_name);
+        ShaderPassMetadata { name, cull: face, queue, hlsl }
+    },
+};
+
+Face: CullMode = {
+    "face" "=" "none" ";" => CullMode::None,
+    "face" "=" "front" ";" => CullMode::Front,
+    "face" "=" "back" ";" => CullMode::Back,
+};
+
+Queue: RenderQueue = {
+    "queue" "=" "opaque" ";" => RenderQueue::Opaque,
+    "queue" "=" "transparent" ";" => RenderQueue::Transparent,
+};
+
+HlslBlock: String = {
+    "hlsl" "{" <contents: HlslContents> "}" => contents,
+};
+
+HlslContents: String = {
+    <items: HlslItem*> => items.concat(),
+};
+
+HlslItem: String = {
+    <text: "text"> => text,
+    <text: "identifier"> => text,
+    <text: "quoted"> => text,
+    "shader" => "shader".to_owned(),
+    "pass" => "pass".to_owned(),
+    "face" => "face".to_owned(),
+    "queue" => "queue".to_owned(),
+    "hlsl" => "hlsl".to_owned(),
+    "none" => "none".to_owned(),
+    "front" => "front".to_owned(),
+    "back" => "back".to_owned(),
+    "opaque" => "opaque".to_owned(),
+    "transparent" => "transparent".to_owned(),
+    "{" <contents: HlslContents> "}" => format!("{{{}}}", contents),
+    "=" => "=".to_owned(),
+    ";" => ";".to_owned(),
+};
+
+extern {
+    type Location = usize;
+    type Error = LexError;
+
+    enum Token {
+        "shader" => Token::Shader,
+        "pass" => Token::Pass,
+        "face" => Token::Face,
+        "queue" => Token::Queue,
+        "hlsl" => Token::Hlsl,
+        "none" => Token::None,
+        "front" => Token::Front,
+        "back" => Token::Back,
+        "opaque" => Token::Opaque,
+        "transparent" => Token::Transparent,
+        "{" => Token::LBrace,
+        "}" => Token::RBrace,
+        "=" => Token::Equals,
+        ";" => Token::Semicolon,
+        "identifier" => Token::Identifier(<String>),
+        "quoted" => Token::Quoted(<String>),
+        "text" => Token::Text(<String>),
+    }
+}
