@@ -25,5 +25,5 @@ pub use game_object::{GameObject, GameObjectWeak};
 pub use instanced_mesh::InstancedMesh;
 pub use mesh::Mesh;
 pub use procedural_mesh::ProceduralMesh;
-pub use scene::{Prefab, Scene};
+pub use scene::Scene;
 pub use skinned_mesh::{Bone, SkinnedMesh};

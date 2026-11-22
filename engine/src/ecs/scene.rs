@@ -38,6 +38,13 @@ pub struct Scene {
 }
 
 impl Scene {
+    pub fn validate_yaml(source: &str) -> Result<()> {
+        let definition: SceneDefinition =
+            serde_yaml::from_str(source).context("Failed to parse scene YAML")?;
+        validate_timing(definition.delta_time, definition.time_since_start)?;
+        validate_game_object_definition(definition.root)
+    }
+
     pub fn load(path: &Path, registry: &ComponentRegistry) -> Result<Self> {
         let source = fs::read_to_string(path)
             .with_context(|| format!("Failed to read scene {}", path.display()))?;
@@ -70,6 +77,26 @@ impl Scene {
         self.initialize_components()?;
         self.initialized.set(true);
         self.apply_pending_mutations()
+    }
+
+    pub fn instantiate_game_object(
+        &mut self,
+        source: &str,
+        registry: &ComponentRegistry,
+    ) -> Result<Unique<GameObject>> {
+        if self.destroyed.get() {
+            bail!("cannot instantiate an object in a destroyed scene");
+        }
+        let definition: GameObjectDefinition =
+            serde_yaml::from_str(source).context("Failed to parse game object YAML")?;
+        let mut components = Vec::new();
+        let object = build_game_object(definition, registry, &mut components)?;
+        self.components.extend(components.iter().cloned());
+        self.initialize_component_refs(&components)?;
+        if self.initialized.get() && !self.pending_mutations.borrow().is_empty() {
+            self.apply_pending_mutations()?;
+        }
+        Ok(object)
     }
 
     pub fn update(&mut self, delta_time: f32, graphics: &mut Graphics) -> Result<()> {
@@ -265,7 +292,15 @@ impl Scene {
     }
 
     fn initialize_components(&mut self) -> Result<()> {
-        for component_ref in self.components.clone() {
+        let components = self.components.clone();
+        self.initialize_component_refs(&components)
+    }
+
+    fn initialize_component_refs(
+        &self,
+        component_refs: &[Weak<RefCell<dyn Component>>],
+    ) -> Result<()> {
+        for component_ref in component_refs {
             let Some(component) = component_ref.upgrade() else {
                 continue;
             };
@@ -352,28 +387,6 @@ impl Scene {
     }
 }
 
-pub struct Prefab {
-    pub root: Unique<GameObject>,
-}
-
-impl Prefab {
-    pub fn load(path: &Path, registry: &ComponentRegistry) -> Result<Self> {
-        let source = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read prefab {}", path.display()))?;
-        Self::from_yaml(&source, registry)
-            .with_context(|| format!("Invalid prefab {}", path.display()))
-    }
-
-    pub fn from_yaml(source: &str, registry: &ComponentRegistry) -> Result<Self> {
-        let definition: SceneDefinition =
-            serde_yaml::from_str(source).context("Failed to parse prefab YAML")?;
-        validate_timing(definition.delta_time, definition.time_since_start)?;
-        let mut components = Vec::new();
-        let root = build_game_object(definition.root, registry, &mut components)?;
-        Ok(Self { root })
-    }
-}
-
 fn validate_timing(delta_time: f32, time_since_start: f32) -> Result<()> {
     if !delta_time.is_finite()
         || delta_time < 0.0
@@ -381,6 +394,22 @@ fn validate_timing(delta_time: f32, time_since_start: f32) -> Result<()> {
         || time_since_start < 0.0
     {
         bail!("scene timing values must be finite and non-negative");
+    }
+    Ok(())
+}
+
+fn validate_game_object_definition(definition: GameObjectDefinition) -> Result<()> {
+    if definition.name.trim().is_empty() {
+        bail!("game object names must not be empty");
+    }
+    definition.transform.to_transform()?;
+    for component in definition.components {
+        if component.type_name.trim().is_empty() {
+            bail!("component type names must not be empty");
+        }
+    }
+    for child in definition.children {
+        validate_game_object_definition(child)?;
     }
     Ok(())
 }
@@ -841,10 +870,36 @@ root:
     }
 
     #[test]
-    fn prefab_uses_the_same_root_object_yaml_shape() {
-        let (registry, _, _, _) = registry(false);
-        let prefab = Prefab::from_yaml("root:\n  name: Prefab\n", &registry).unwrap();
-        assert_eq!(prefab.root.borrow().name, "Prefab");
+    fn instantiated_game_objects_are_awakened_and_join_scene_component_updates() {
+        let calls = Rc::new(RefCell::new(Vec::<(&'static str, u64)>::new()));
+        let mut registry = ComponentRegistry::new();
+        registry.set_context(Rc::clone(&calls));
+        let mut scene = Scene::from_yaml("root:\n  name: Root\n", &registry).unwrap();
+        scene.initialize().unwrap();
+
+        let object = scene
+            .instantiate_game_object(
+                "name: Spawned\ncomponents:\n  - type: OwnerProbe\n",
+                &registry,
+            )
+            .unwrap();
+        let object_id = object.borrow().id();
+        scene.root.borrow_mut().add_child(object.clone());
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [("awake", object_id), ("start", object_id)]
+        );
+        scene.update(0.016, &mut Graphics::default()).unwrap();
+        scene.destroy().unwrap();
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [
+                ("awake", object_id),
+                ("start", object_id),
+                ("update", object_id),
+                ("destroy", object_id)
+            ]
+        );
     }
 
     #[test]

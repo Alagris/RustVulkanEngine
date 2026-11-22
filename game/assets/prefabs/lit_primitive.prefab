@@ -1,0 +1,9 @@
+root:
+  name: LitPrimitive
+  components:
+    - id: mesh
+      type: Mesh
+      data:
+        primitive: cube
+        material: CubeLit
+        size: [1.0, 1.0, 1.0]

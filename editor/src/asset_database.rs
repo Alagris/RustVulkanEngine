@@ -5,7 +5,7 @@ use engine::render_pipeline::{preprocess_shader_file, shader_asset_name_from_pat
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AssetType {
@@ -63,6 +63,7 @@ pub struct AssetDatabase {
     root: PathBuf,
     assets: BTreeMap<AssetRef, PathBuf>,
     processors: HashMap<AssetType, AssetProcessor>,
+    prefab_cache: RwLock<HashMap<String, serde_yaml::Value>>,
 }
 
 impl AssetDatabase {
@@ -99,13 +100,6 @@ impl AssetDatabase {
                 else {
                     continue;
                 };
-                #[cfg(debug_assertions)]
-                if matches!(asset_type, AssetType::Scene | AssetType::Prefab) {
-                    let document = read_yaml(&path)?;
-                    validate_component_constraints(&document).with_context(|| {
-                        format!("Invalid component constraints in {}", path.display())
-                    })?;
-                }
                 let file_name = path
                     .file_stem()
                     .and_then(|stem| stem.to_str())
@@ -137,11 +131,41 @@ impl AssetDatabase {
                 }
             }
         }
-        Ok(Self {
+        let database = Self {
             root,
             assets,
             processors: HashMap::new(),
-        })
+            prefab_cache: RwLock::new(HashMap::new()),
+        };
+        let yaml_assets = database
+            .assets
+            .iter()
+            .filter(|(reference, _)| {
+                matches!(reference.asset_type, AssetType::Scene | AssetType::Prefab)
+            })
+            .map(|(reference, path)| (reference.clone(), path.clone()))
+            .collect::<Vec<_>>();
+        for (reference, path) in yaml_assets {
+            let document = read_yaml(&path)?;
+            let _expanded = match reference.asset_type {
+                AssetType::Scene => {
+                    let mut scene = document;
+                    crate::prefab::Prefab::expand_scene(&mut scene, &database)
+                        .with_context(|| format!("Invalid scene {}", path.display()))?;
+                    scene
+                }
+                AssetType::Prefab => {
+                    let prefab = crate::prefab::Prefab::load(&reference.name, &database)
+                        .with_context(|| format!("Invalid prefab {}", path.display()))?;
+                    scene_document_with_root(prefab.root)
+                }
+                _ => unreachable!("only scene and prefab YAML assets are selected"),
+            };
+            #[cfg(debug_assertions)]
+            validate_component_constraints(&_expanded)
+                .with_context(|| format!("Invalid component constraints in {}", path.display()))?;
+        }
+        Ok(database)
     }
 
     pub fn root(&self) -> &Path {
@@ -164,6 +188,65 @@ impl AssetDatabase {
                     self.root.display()
                 )
             })
+    }
+
+    pub fn load_prefab(&self, name: &str) -> Result<crate::prefab::Prefab> {
+        crate::prefab::Prefab::load(name, self)
+    }
+
+    pub fn clear_prefab_cache(&self) -> Result<()> {
+        self.prefab_cache
+            .write()
+            .map_err(|_| anyhow!("prefab cache lock was poisoned"))?
+            .clear();
+        Ok(())
+    }
+
+    pub(crate) fn resolve_prefab_root(
+        &self,
+        name: &str,
+        stack: &mut Vec<PathBuf>,
+    ) -> Result<serde_yaml::Value> {
+        if let Some(root) = self
+            .prefab_cache
+            .read()
+            .map_err(|_| anyhow!("prefab cache lock was poisoned"))?
+            .get(name)
+            .cloned()
+        {
+            return Ok(root);
+        }
+        let path = self.resolve(&AssetRef {
+            name: name.to_owned(),
+            asset_type: AssetType::Prefab,
+        })?;
+        let root = crate::prefab::load_prefab_path(path, self, stack)?;
+        let mut cache = self
+            .prefab_cache
+            .write()
+            .map_err(|_| anyhow!("prefab cache lock was poisoned"))?;
+        Ok(cache.entry(name.to_owned()).or_insert(root).clone())
+    }
+
+    pub fn prepare_development_scene(&self, scene_path: &Path) -> Result<PathBuf> {
+        let scene_path = scene_path
+            .canonicalize()
+            .with_context(|| format!("Failed to resolve scene {}", scene_path.display()))?;
+        let scene = self.expanded_scene_yaml(&scene_path)?;
+        let output = std::env::temp_dir()
+            .join("rust-vulkan-game-engine")
+            .join("development")
+            .join(format!("{}-{}", std::process::id(), file_nonce()));
+        fs::create_dir_all(&output)?;
+        let scene_output = output.join(
+            scene_path
+                .file_name()
+                .ok_or_else(|| anyhow!("scene path has no filename"))?,
+        );
+        fs::write(&scene_output, scene).with_context(|| {
+            format!("Failed to write expanded scene {}", scene_output.display())
+        })?;
+        Ok(scene_output)
     }
 
     pub fn register_processor(
@@ -381,6 +464,47 @@ impl AssetDatabase {
         }
     }
 
+    pub(crate) fn expanded_scene_yaml(&self, scene_path: &Path) -> Result<String> {
+        let mut scene = read_yaml(scene_path)?;
+        crate::prefab::Prefab::expand_scene(&mut scene, self)
+            .with_context(|| format!("Failed to expand prefabs in {}", scene_path.display()))?;
+        serde_yaml::to_string(&scene).with_context(|| {
+            format!(
+                "Failed to serialize expanded scene {}",
+                scene_path.display()
+            )
+        })
+    }
+
+    pub(crate) fn process_scene(&self, source: &Path, destination: &Path) -> Result<()> {
+        let expanded_scene = self.expanded_scene_yaml(source)?;
+        let file_name = source
+            .file_name()
+            .ok_or_else(|| anyhow!("scene path has no filename"))?;
+        let stage = std::env::temp_dir()
+            .join("rust-vulkan-game-engine")
+            .join("packaging")
+            .join(format!("scene-{}-{}", std::process::id(), file_nonce()));
+        fs::create_dir_all(&stage)?;
+        let staged_scene = stage.join(file_name);
+        let result = (|| {
+            fs::write(&staged_scene, expanded_scene)
+                .with_context(|| format!("Failed to stage scene {}", source.display()))?;
+            self.process(AssetType::Scene, &staged_scene, destination)
+        })();
+        let cleanup = fs::remove_dir_all(&stage).with_context(|| {
+            format!(
+                "Failed to clean scene staging directory {}",
+                stage.display()
+            )
+        });
+        match (result, cleanup) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), _) => Err(error),
+            (Ok(()), Err(error)) => Err(error),
+        }
+    }
+
     pub(crate) fn process(
         &self,
         asset_type: AssetType,
@@ -405,6 +529,12 @@ pub(crate) fn read_yaml(path: &Path) -> Result<serde_yaml::Value> {
     let text =
         fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
     serde_yaml::from_str(&text).with_context(|| format!("Invalid YAML in {}", path.display()))
+}
+
+fn scene_document_with_root(root: serde_yaml::Value) -> serde_yaml::Value {
+    let mut scene = serde_yaml::Mapping::new();
+    scene.insert(serde_yaml::Value::String("root".to_owned()), root);
+    serde_yaml::Value::Mapping(scene)
 }
 
 #[cfg(debug_assertions)]

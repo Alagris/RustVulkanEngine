@@ -95,9 +95,12 @@ impl Project {
         let pipeline = self
             .assets
             .prepare_development_pipeline(&self.settings.runtime.pipeline)?;
+        let default_scene = self
+            .assets
+            .prepare_development_scene(&self.settings.runtime.default_scene)?;
         Ok(RuntimeSettings {
             pipeline,
-            default_scene: self.settings.runtime.default_scene.clone(),
+            default_scene,
         })
     }
 
@@ -121,11 +124,7 @@ impl Project {
                 .ok_or_else(|| anyhow!("packaged scene path has no parent"))?,
         )?;
         self.assets
-            .process(
-                AssetType::Scene,
-                &self.settings.runtime.default_scene,
-                &scene_output,
-            )
+            .process_scene(&self.settings.runtime.default_scene, &scene_output)
             .with_context(|| {
                 format!(
                     "Failed to package scene {}",

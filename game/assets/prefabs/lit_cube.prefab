@@ -1,0 +1,7 @@
+parent: lit_primitive
+root:
+  name: Cube
+  transform:
+    translation: [0.0, -0.15, 0.0]
+    rotation: [-0.21140331, 0.31124407, 0.07122724, 0.9237762]
+    scale: [1.0, 1.5, 1.0]
