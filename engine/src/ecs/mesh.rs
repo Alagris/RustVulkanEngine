@@ -1,3 +1,4 @@
+use crate::ecs::component::ComponentInstance;
 use crate::ecs::{Component, GameObject, Scene};
 use crate::graphics::{
     Graphics, InstanceBuffer, InstanceBufferHandle, InstanceData, Mesh as GraphicsMesh,
@@ -7,13 +8,18 @@ use anyhow::Result;
 use std::any::Any;
 use std::sync::Arc;
 
+#[crate::ecs::component]
+#[derive(crate::ecs::Component)]
 pub struct Mesh {
     mesh: GraphicsMesh,
 }
 
 impl Mesh {
     pub fn new(mesh: GraphicsMesh) -> Self {
-        Self { mesh }
+        Self {
+            instance: ComponentInstance::default(),
+            mesh,
+        }
     }
 
     pub fn mesh(&self) -> &GraphicsMesh {
@@ -44,6 +50,8 @@ impl Component for Mesh {
     }
 }
 
+#[crate::ecs::component]
+#[derive(crate::ecs::Component)]
 pub struct ProceduralMesh {
     material: Arc<Material>,
     vertices: i32,
@@ -56,6 +64,7 @@ impl ProceduralMesh {
             anyhow::bail!("procedural mesh vertex and instance counts must be positive");
         }
         Ok(Self {
+            instance: ComponentInstance::default(),
             material,
             vertices,
             instances,
@@ -86,6 +95,8 @@ impl Component for ProceduralMesh {
     }
 }
 
+#[crate::ecs::component]
+#[derive(crate::ecs::Component)]
 pub struct InstancedMesh {
     mesh: GraphicsMesh,
     instances: InstanceBufferHandle,
@@ -94,6 +105,7 @@ pub struct InstancedMesh {
 impl InstancedMesh {
     pub fn new<T: InstanceData>(mesh: GraphicsMesh, instances: &InstanceBuffer<T>) -> Self {
         Self {
+            instance: ComponentInstance::default(),
             mesh,
             instances: instances.erase(),
         }

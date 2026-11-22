@@ -1,3 +1,4 @@
+use crate::ecs::component::ComponentInstance;
 use crate::ecs::{Component, GameObject, Scene};
 use crate::graphics::{
     GpuContext, GpuSkinner, Graphics, IndexBuffer, Mesh as GraphicsMesh, Submesh, Vertex,
@@ -16,6 +17,8 @@ pub struct Bone {
     pub pose_matrix: Mat4,
 }
 
+#[crate::ecs::component]
+#[derive(crate::ecs::Component)]
 pub struct SkinnedMesh {
     pub name: String,
     pub mesh: GraphicsMesh,
@@ -30,6 +33,7 @@ pub struct SkinnedMesh {
 impl SkinnedMesh {
     pub fn new(name: String, mesh: GraphicsMesh, bones: Vec<Bone>) -> Self {
         Self {
+            instance: ComponentInstance::default(),
             name,
             mesh,
             bones,
@@ -79,6 +83,7 @@ impl SkinnedMesh {
             <glam::Mat4 as crate::graphics::InstanceData>::layout(),
         )?;
         Ok(Self {
+            instance: ComponentInstance::default(),
             name,
             mesh,
             bones,

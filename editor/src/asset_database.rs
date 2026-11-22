@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
+use engine::ecs::ComponentRegistry;
 use engine::render_pipeline::shader_asset_name;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -65,6 +66,14 @@ pub struct AssetDatabase {
 
 impl AssetDatabase {
     pub fn scan(root: impl AsRef<Path>) -> Result<Self> {
+        let component_registry = ComponentRegistry::new();
+        Self::scan_with_component_registry(root, &component_registry)
+    }
+
+    pub fn scan_with_component_registry(
+        root: impl AsRef<Path>,
+        component_registry: &ComponentRegistry,
+    ) -> Result<Self> {
         let root = root.as_ref().canonicalize().with_context(|| {
             format!(
                 "Failed to resolve asset directory {}",
@@ -97,6 +106,14 @@ impl AssetDatabase {
                 else {
                     continue;
                 };
+                if matches!(asset_type, AssetType::Scene | AssetType::Prefab) {
+                    let document = read_yaml(&path)?;
+                    component_registry
+                        .validate_component_constraints(&document)
+                        .with_context(|| {
+                            format!("Invalid component constraints in {}", path.display())
+                        })?;
+                }
                 let file_name = path
                     .file_stem()
                     .and_then(|stem| stem.to_str())
@@ -468,6 +485,33 @@ passes:
         }
         assert_eq!(AssetType::from_extension("scene"), Some(AssetType::Scene));
         assert_eq!(AssetType::from_extension("prefab"), Some(AssetType::Prefab));
+    }
+
+    #[test]
+    fn scan_rejects_missing_required_and_duplicate_unique_components() {
+        let missing_required_root = temp_dir("missing-required-component");
+        fs::write(
+            missing_required_root.join("invalid.scene"),
+            "root:\n  name: Root\n  components:\n    - type: Animator\n",
+        )
+        .unwrap();
+        let error = AssetDatabase::scan(&missing_required_root)
+            .err()
+            .expect("Animator without SkinnedMesh must fail validation");
+        assert!(format!("{error:#}").contains("requires component 'SkinnedMesh'"));
+        fs::remove_dir_all(missing_required_root).unwrap();
+
+        let duplicate_unique_root = temp_dir("duplicate-unique-component");
+        fs::write(
+            duplicate_unique_root.join("invalid.scene"),
+            "root:\n  name: Root\n  components:\n    - type: Camera\n    - type: Camera\n",
+        )
+        .unwrap();
+        let error = AssetDatabase::scan(&duplicate_unique_root)
+            .err()
+            .expect("duplicate Camera components must fail validation");
+        assert!(format!("{error:#}").contains("more than one unique component 'Camera'"));
+        fs::remove_dir_all(duplicate_unique_root).unwrap();
     }
 
     #[test]

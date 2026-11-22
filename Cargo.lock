@@ -336,6 +336,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "component_macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+]
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -514,6 +523,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "cgmath",
+ "component_macros",
  "fbx-reader",
  "glam",
  "lalrpop",

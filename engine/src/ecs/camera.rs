@@ -1,3 +1,4 @@
+use crate::ecs::component::ComponentInstance;
 use crate::ecs::{Component, GameObject, Scene};
 use crate::graphics::FrameUniform;
 use anyhow::{Result, bail};
@@ -5,6 +6,9 @@ use glam::{Mat4, Vec3, Vec4};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 
+#[crate::ecs::component]
+#[derive(crate::ecs::Component)]
+#[unique]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Camera {
@@ -19,6 +23,7 @@ pub struct Camera {
 impl Default for Camera {
     fn default() -> Self {
         Self {
+            instance: ComponentInstance::default(),
             position: Vec3::new(0.0, 3.0, 5.0),
             target: Vec3::ZERO,
             up: Vec3::Y,
@@ -152,6 +157,7 @@ mod tests {
     fn camera_is_serializable_and_builds_frame_uniforms() {
         let camera = Camera::default();
         let serialized = serde_yaml::to_string(&camera).unwrap();
+        assert!(!serialized.contains("instance"));
         let parsed: Camera = serde_yaml::from_str(&serialized).unwrap();
         assert_eq!(parsed.position, camera.position);
         let frame = parsed.frame_uniform(16.0 / 9.0, 4).unwrap();

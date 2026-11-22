@@ -21,8 +21,9 @@ For a bounded smoke run that exits after ten successfully presented frames:
 cargo run -p game -- --frames 10
 ```
 
-The workspace has three crates: `engine` contains the graphics API and runtime,
-`editor` indexes and resolves game assets, and `game` is the sample project.
+The workspace has four crates: `engine` contains the graphics API and runtime,
+`component_macros` provides component derive/attribute macros, `editor` indexes
+and resolves game assets, and `game` is the sample project.
 The game project loads `game/assets/pipeline.pipe`; the editor resolves
 `(asset name, asset type)` references to absolute development paths before the
 engine sees them. HLSL is compiled into SPIR-V through the embedded `shaderc`
@@ -185,12 +186,42 @@ rendering and component updates happen in one callback. `awake`, `start`, and
 
 Components can change an object's transform through `GameObject::set_transform`.
 For changes to another object, use
-`Scene::defer_game_object_mutation(object_id, |object| ...)`. Structural
-component additions/removals use `GameObject::add_component(scene, ...)` and
-`GameObject::remove_component(scene, index)`; they are applied after the
-current component-update traversal. Components live in a flat scene-wide
-registry, and swap-removal repairs both the moved component's index and its
-owner's index list.
+`Scene::defer_game_object_mutation(object_id, |object| ...)`. Components are strongly owned by their `GameObject`; the scene keeps weak
+references for component and object traversal, compacting expired references
+during updates. Components choose which typed `ComponentWeak<T>` handles to
+cache themselves, avoiding repeated type searches without a shared sibling
+cache. Structural component
+additions/removals use `GameObject::add_component(scene, ...)` and
+`GameObject::remove_component::<T>(scene)`; they are applied after the current
+component-update traversal.
+Parents own their child objects directly. `GameObject::weak_reference` creates
+a non-owning handle that can be resolved through `Scene::resolve_game_object`;
+the scene prunes expired object handles during update.
+
+Use the `#[component]` attribute with `#[derive(Component)]` to inject the
+`ComponentInstance` field (marked `#[serde(skip)]` when the type derives serde)
+and generate `Deref`/`DerefMut` plus component validation metadata. Component
+constructors initialize the injected field with
+`ComponentInstance::default()`. Add `#[require(TypeA, TypeB)]` to require sibling
+components and `#[unique]` to restrict the component to one instance per
+`GameObject`:
+
+```rust
+#[component]
+#[derive(Component)]
+#[require(SkinnedMesh)]
+#[unique]
+struct Animator {
+    // Component data
+}
+```
+
+The engine validates these constraints when loading scenes and prefabs. The
+editor's `AssetDatabase::scan` validates built-in component metadata; custom
+component metadata can be supplied with
+`AssetDatabase::scan_with_component_registry`. Register a custom component with
+`ComponentRegistry::register_with_metadata` so its requirements and uniqueness
+rules are available to validation.
 `ecs::Mesh`, `ecs::ProceduralMesh`, and `ecs::InstancedMesh` queue graphics API
 draw calls through their unified `update` callback. `Camera` is serializable
 and supplies the frame and cascaded-shadow uniforms.

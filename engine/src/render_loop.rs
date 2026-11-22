@@ -265,27 +265,23 @@ fn register_mesh_components(
     {
         let context = context.clone();
         let materials = Arc::clone(&materials);
-        registry.register("Mesh", move |data| {
+        registry.register_with_metadata::<Mesh>("Mesh", move |data| {
             let settings: PrimitiveMeshSettings = serde_yaml::from_value(data.clone())?;
             let material = get_material(&materials, &settings.material)?;
             let mesh = create_primitive_mesh(&context, material, &settings)?;
-            Ok(Box::new(Mesh::new(mesh)))
+            Ok(Mesh::new(mesh))
         })?;
     }
     {
         let materials = Arc::clone(&materials);
-        registry.register("ProceduralMesh", move |data| {
+        registry.register_with_metadata::<ProceduralMesh>("ProceduralMesh", move |data| {
             let settings: ProceduralMeshSettings = serde_yaml::from_value(data.clone())?;
             let material = get_material(&materials, &settings.material)?;
-            Ok(Box::new(ProceduralMesh::new(
-                material,
-                settings.vertices,
-                settings.instances,
-            )?))
+            ProceduralMesh::new(material, settings.vertices, settings.instances)
         })?;
     }
     {
-        registry.register("InstancedMesh", move |data| {
+        registry.register_with_metadata::<InstancedMesh>("InstancedMesh", move |data| {
             let settings: InstancedMeshSettings = serde_yaml::from_value(data.clone())?;
             let material = get_material(&materials, &settings.primitive.material)?;
             let mesh = create_primitive_mesh(&context, material, &settings.primitive)?;
@@ -295,7 +291,7 @@ fn register_mesh_components(
                 .map(|matrix| Mat4::from_cols_array(&matrix))
                 .collect::<Vec<_>>();
             let instances = InstanceBuffer::new(&context, &transforms)?;
-            Ok(Box::new(InstancedMesh::new(mesh, &instances)))
+            Ok(InstancedMesh::new(mesh, &instances))
         })?;
     }
     Ok(())

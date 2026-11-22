@@ -1,28 +1,38 @@
+use crate::ecs::component::{ComponentWeak, UniqueRc};
 use crate::ecs::{Component, Scene};
 use crate::graphics::Transform;
 use anyhow::{Result, bail};
 use cgmath::{InnerSpace, Matrix4, One, Quaternion, SquareMatrix, Vector3};
-use std::cell::{Cell, Ref, RefCell, RefMut};
+use std::cell::{Cell, Ref, RefMut};
+use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub(crate) struct ComponentInstance {
-    pub(crate) idx: usize,
-    pub(crate) owner_id: u64,
-    pub(crate) component: Box<dyn Component>,
-    pub(crate) awoken: bool,
-    pub(crate) started: bool,
-    pub(crate) updates: bool,
+#[derive(Clone)]
+pub struct GameObjectWeak {
+    id: u64,
+    lifetime: Weak<()>,
+}
+
+impl GameObjectWeak {
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.lifetime.upgrade().is_some()
+    }
 }
 
 static NEXT_GAME_OBJECT_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct GameObject {
     id: u64,
+    lifetime: Rc<()>,
     pub name: String,
     transform: Cell<Transform>,
     world_transform: Cell<Transform>,
     children: Vec<GameObject>,
-    pub(crate) component_indices: RefCell<Vec<usize>>,
+    pub(crate) components: Vec<UniqueRc<dyn Component>>,
 }
 
 impl GameObject {
@@ -33,11 +43,12 @@ impl GameObject {
         );
         Self {
             id: NEXT_GAME_OBJECT_ID.fetch_add(1, Ordering::Relaxed),
+            lifetime: Rc::new(()),
             name,
             transform: Cell::new(transform),
             world_transform: Cell::new(transform),
             children,
-            component_indices: RefCell::new(Vec::new()),
+            components: Vec::new(),
         }
     }
 
@@ -47,6 +58,13 @@ impl GameObject {
 
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    pub fn weak_reference(&self) -> GameObjectWeak {
+        GameObjectWeak {
+            id: self.id,
+            lifetime: Rc::downgrade(&self.lifetime),
+        }
     }
 
     pub fn set_transform(&self, transform: Transform) -> Result<()> {
@@ -69,12 +87,24 @@ impl GameObject {
         scene.add_component(self, component)
     }
 
-    pub fn remove_component(&self, scene: &Scene, component_index: usize) -> Result<()> {
-        scene.remove_component(self, component_index)
+    pub fn remove_component<T: Component + 'static>(&self, scene: &Scene) -> Result<()> {
+        scene.remove_component::<T>(self)
     }
 
     pub fn add_child(&mut self, child: GameObject) {
         self.children.push(child);
+    }
+
+    pub fn remove_child(&mut self, child_id: u64) -> bool {
+        let Some(index) = self
+            .children
+            .iter()
+            .position(|child| child.id() == child_id)
+        else {
+            return false;
+        };
+        self.children.remove(index);
+        true
     }
 
     pub fn children(&self) -> &[GameObject] {
@@ -82,50 +112,53 @@ impl GameObject {
     }
 
     pub fn get_component<'a, T: Component + 'static>(
-        &self,
-        scene: &'a Scene,
+        &'a self,
+        _scene: &'a Scene,
     ) -> Option<Ref<'a, T>> {
-        self.component_indices.borrow().iter().find_map(|&index| {
-            let instance = scene.components.get(index)?;
-            let borrowed = instance.borrow();
-            Ref::filter_map(borrowed, |instance| {
-                instance.component.as_any().downcast_ref::<T>()
-            })
-            .ok()
+        self.components.iter().find_map(|component| {
+            let borrowed = component.borrow();
+            Ref::filter_map(borrowed, |instance| instance.as_any().downcast_ref::<T>()).ok()
         })
     }
 
     pub fn get_component_mut<'a, T: Component + 'static>(
-        &self,
-        scene: &'a Scene,
+        &'a self,
+        _scene: &'a Scene,
     ) -> Option<RefMut<'a, T>> {
-        self.component_indices.borrow().iter().find_map(|&index| {
-            let instance = scene.components.get(index)?;
-            let borrowed = instance.borrow_mut();
+        self.components.iter().find_map(|component| {
+            let borrowed = component.borrow_mut();
             RefMut::filter_map(borrowed, |instance| {
-                instance.component.as_any_mut().downcast_mut::<T>()
+                instance.as_any_mut().downcast_mut::<T>()
             })
             .ok()
         })
     }
 
-    pub fn get_components<'a, T: Component + 'static>(&self, scene: &'a Scene) -> Vec<Ref<'a, T>> {
-        self.component_indices
-            .borrow()
+    pub fn get_component_weak<T: Component + 'static>(&self) -> Option<ComponentWeak<T>> {
+        self.components.iter().find_map(|component| {
+            let borrowed = component.try_borrow().ok()?;
+            borrowed
+                .as_any()
+                .is::<T>()
+                .then(|| ComponentWeak::new(std::rc::Rc::downgrade(component)))
+        })
+    }
+
+    pub fn get_components<'a, T: Component + 'static>(
+        &'a self,
+        _scene: &'a Scene,
+    ) -> Vec<Ref<'a, T>> {
+        self.components
             .iter()
-            .filter_map(|&index| {
-                let instance = scene.components.get(index)?;
-                let borrowed = instance.borrow();
-                Ref::filter_map(borrowed, |instance| {
-                    instance.component.as_any().downcast_ref::<T>()
-                })
-                .ok()
+            .filter_map(|component| {
+                let borrowed = component.borrow();
+                Ref::filter_map(borrowed, |instance| instance.as_any().downcast_ref::<T>()).ok()
             })
             .collect()
     }
 
     pub fn components(&self) -> usize {
-        self.component_indices.borrow().len()
+        self.components.len()
     }
 
     pub(crate) fn update_world_transforms(&self, parent_transform: Transform) {
@@ -136,6 +169,13 @@ impl GameObject {
         }
     }
 
+    pub(crate) fn collect_weak_references(&self, objects: &mut Vec<GameObjectWeak>) {
+        objects.push(self.weak_reference());
+        for child in &self.children {
+            child.collect_weak_references(objects);
+        }
+    }
+
     pub(crate) fn destroy_components(&self, scene: &Scene) -> Result<()> {
         let mut first_error = None;
         for child in self.children.iter().rev() {
@@ -143,13 +183,11 @@ impl GameObject {
                 first_error.get_or_insert(error);
             }
         }
-        for &index in self.component_indices.borrow().iter().rev() {
-            if let Some(instance) = scene.components.get(index) {
-                let mut instance = instance.borrow_mut();
-                if instance.awoken {
-                    if let Err(error) = instance.component.destroy(scene, self) {
-                        first_error.get_or_insert(error);
-                    }
+        for component in self.components.iter().rev() {
+            let mut component = component.borrow_mut();
+            if component.awoken {
+                if let Err(error) = component.destroy(scene, self) {
+                    first_error.get_or_insert(error);
                 }
             }
         }

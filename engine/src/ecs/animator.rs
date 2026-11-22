@@ -1,11 +1,16 @@
 use crate::anim::AnimationClip;
+use crate::ecs::component::{ComponentInstance, ComponentWeak};
 use crate::ecs::{Component, GameObject, Scene, SkinnedMesh};
 use crate::graphics::Graphics;
 use anyhow::{Result, anyhow, bail};
 use glam::Mat4;
 use std::any::Any;
 
+#[crate::ecs::component]
+#[derive(crate::ecs::Component)]
+#[require(SkinnedMesh)]
 pub struct Animator {
+    skinned_mesh: Option<ComponentWeak<SkinnedMesh>>,
     clips: Vec<AnimationClip>,
     active_clip: Option<usize>,
     elapsed: f32,
@@ -18,6 +23,8 @@ impl Animator {
             bail!("an Animator requires at least one animation clip");
         }
         Ok(Self {
+            skinned_mesh: None,
+            instance: ComponentInstance::default(),
             clips,
             active_clip: None,
             elapsed: 0.0,
@@ -52,7 +59,8 @@ impl Component for Animator {
         self
     }
 
-    fn start(&mut self, _scene: &Scene, _game_object: &GameObject) -> bool {
+    fn start(&mut self, _scene: &Scene, game_object: &GameObject) -> bool {
+        self.skinned_mesh = game_object.get_component_weak::<SkinnedMesh>();
         true
     }
 
@@ -65,6 +73,13 @@ impl Component for Animator {
         if !self.playing {
             return Ok(());
         }
+        if self
+            .skinned_mesh
+            .as_ref()
+            .map_or(true, |skinned_mesh| !skinned_mesh.is_alive())
+        {
+            self.skinned_mesh = game_object.get_component_weak::<SkinnedMesh>();
+        }
         let clip_index = self
             .active_clip
             .ok_or_else(|| anyhow!("playing Animator has no active clip"))?;
@@ -76,14 +91,20 @@ impl Component for Animator {
             .clips
             .get(clip_index)
             .ok_or_else(|| anyhow!("Animator active clip index is invalid"))?;
-        let mut skinned_mesh = game_object
-            .get_component_mut::<SkinnedMesh>(scene)
+        let result = self
+            .skinned_mesh
+            .as_ref()
+            .and_then(|skinned_mesh| {
+                skinned_mesh.with_mut(|skinned_mesh| -> Result<()> {
+                    if !skinned_mesh.is_skinned() {
+                        bail!("Animator requires a SkinnedMesh loaded from FBX skin data");
+                    }
+                    clip.pose_at(self.elapsed, &mut skinned_mesh.bones)?;
+                    skinned_mesh.update_skinning()
+                })
+            })
             .ok_or_else(|| anyhow!("Animator requires a SkinnedMesh on the same GameObject"))?;
-        if !skinned_mesh.is_skinned() {
-            bail!("Animator requires a SkinnedMesh loaded from FBX skin data");
-        }
-        clip.pose_at(self.elapsed, &mut skinned_mesh.bones)?;
-        skinned_mesh.update_skinning()
+        result
     }
 }
 

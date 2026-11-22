@@ -9,8 +9,11 @@ pub mod skinned_mesh;
 pub use crate::anim::AnimationClip;
 pub use animator::Animator;
 pub use camera::Camera;
-pub use component::{Component, ComponentRegistry};
-pub use game_object::GameObject;
+pub use component::{
+    Component, ComponentInstance, ComponentMetadata, ComponentRegistry, ComponentWeak,
+};
+pub use component_macros::{Component, component};
+pub use game_object::{GameObject, GameObjectWeak};
 pub use mesh::{InstancedMesh, Mesh, ProceduralMesh};
 pub use scene::{Prefab, Scene};
 pub use skinned_mesh::{Bone, SkinnedMesh};

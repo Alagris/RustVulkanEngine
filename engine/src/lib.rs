@@ -1,5 +1,7 @@
 #![allow(unsafe_op_in_unsafe_fn, clippy::too_many_arguments)]
 
+extern crate self as engine;
+
 pub mod anim;
 pub mod app;
 pub mod ecs;
