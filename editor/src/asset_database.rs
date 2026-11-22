@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
-use engine::ecs::ComponentRegistry;
+#[cfg(debug_assertions)]
+use engine::ecs::component::{ComponentRuleRegistration, inventory};
 use engine::render_pipeline::shader_asset_name;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -66,14 +67,6 @@ pub struct AssetDatabase {
 
 impl AssetDatabase {
     pub fn scan(root: impl AsRef<Path>) -> Result<Self> {
-        let component_registry = ComponentRegistry::new();
-        Self::scan_with_component_registry(root, &component_registry)
-    }
-
-    pub fn scan_with_component_registry(
-        root: impl AsRef<Path>,
-        component_registry: &ComponentRegistry,
-    ) -> Result<Self> {
         let root = root.as_ref().canonicalize().with_context(|| {
             format!(
                 "Failed to resolve asset directory {}",
@@ -106,13 +99,12 @@ impl AssetDatabase {
                 else {
                     continue;
                 };
+                #[cfg(debug_assertions)]
                 if matches!(asset_type, AssetType::Scene | AssetType::Prefab) {
                     let document = read_yaml(&path)?;
-                    component_registry
-                        .validate_component_constraints(&document)
-                        .with_context(|| {
-                            format!("Invalid component constraints in {}", path.display())
-                        })?;
+                    validate_component_constraints(&document).with_context(|| {
+                        format!("Invalid component constraints in {}", path.display())
+                    })?;
                 }
                 let file_name = path
                     .file_stem()
@@ -413,6 +405,94 @@ pub(crate) fn read_yaml(path: &Path) -> Result<serde_yaml::Value> {
     serde_yaml::from_str(&text).with_context(|| format!("Invalid YAML in {}", path.display()))
 }
 
+#[cfg(debug_assertions)]
+fn validate_component_constraints(scene: &serde_yaml::Value) -> Result<()> {
+    let root = scene
+        .get("root")
+        .ok_or_else(|| anyhow!("scene or prefab must contain a root game object"))?;
+    validate_game_object(root, "root")
+}
+
+#[cfg(debug_assertions)]
+fn validate_game_object(object: &serde_yaml::Value, path: &str) -> Result<()> {
+    let name = object
+        .get("name")
+        .and_then(serde_yaml::Value::as_str)
+        .ok_or_else(|| anyhow!("{path} must have a string name"))?;
+    let object_path = format!("{path} ({name})");
+    let empty_components = Vec::new();
+    let components = match object.get("components") {
+        Some(components) => components
+            .as_sequence()
+            .ok_or_else(|| anyhow!("{object_path} components must be a sequence"))?,
+        None => &empty_components,
+    };
+    let component_types = components
+        .iter()
+        .map(|component| {
+            component
+                .get("type")
+                .and_then(serde_yaml::Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("{object_path} contains a component without a string type"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    for component_type in &component_types {
+        let mut registrations = inventory::iter::<ComponentRuleRegistration>
+            .into_iter()
+            .filter(|rules| rules.type_name == component_type);
+        let Some(rules) = registrations.next() else {
+            continue;
+        };
+        if registrations.next().is_some() {
+            bail!(
+                "component rule metadata for '{}' is registered more than once",
+                component_type
+            );
+        }
+        if rules.unique
+            && component_types
+                .iter()
+                .filter(|candidate| *candidate == component_type)
+                .count()
+                > 1
+        {
+            bail!(
+                "{object_path} contains more than one unique component '{}'",
+                component_type
+            );
+        }
+        for requirement in rules.required_components {
+            let required_name = requirement
+                .rsplit("::")
+                .next()
+                .unwrap_or(requirement)
+                .trim();
+            if !component_types
+                .iter()
+                .any(|candidate| candidate == required_name)
+            {
+                bail!(
+                    "{object_path} component '{}' requires component '{}'",
+                    component_type,
+                    required_name
+                );
+            }
+        }
+    }
+
+    if let Some(children) = object.get("children") {
+        let children = children
+            .as_sequence()
+            .ok_or_else(|| anyhow!("{object_path} children must be a sequence"))?;
+        for (index, child) in children.iter().enumerate() {
+            validate_game_object(child, &format!("{object_path}.children[{index}]"))?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn file_nonce() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -423,6 +503,12 @@ pub(crate) fn file_nonce() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(debug_assertions)]
+    #[engine::ecs::component]
+    #[derive(engine::ecs::Component)]
+    #[require(Camera, engine::ecs::Mesh)]
+    struct EditorRuleProbe {}
 
     fn temp_dir(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -487,8 +573,24 @@ passes:
         assert_eq!(AssetType::from_extension("prefab"), Some(AssetType::Prefab));
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn scan_rejects_missing_required_and_duplicate_unique_components() {
+        let _probe = EditorRuleProbe {
+            instance: engine::ecs::ComponentInstance::default(),
+        };
+        let custom_root = temp_dir("custom-component-rules");
+        fs::write(
+            custom_root.join("invalid.scene"),
+            "root:\n  name: Root\n  components:\n    - type: EditorRuleProbe\n    - type: Camera\n",
+        )
+        .unwrap();
+        let error = AssetDatabase::scan(&custom_root)
+            .err()
+            .expect("custom component metadata must be discovered automatically");
+        assert!(format!("{error:#}").contains("requires component 'Mesh'"));
+        fs::remove_dir_all(custom_root).unwrap();
+
         let missing_required_root = temp_dir("missing-required-component");
         fs::write(
             missing_required_root.join("invalid.scene"),
@@ -512,6 +614,19 @@ passes:
             .expect("duplicate Camera components must fail validation");
         assert!(format!("{error:#}").contains("more than one unique component 'Camera'"));
         fs::remove_dir_all(duplicate_unique_root).unwrap();
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn release_scan_skips_component_rule_validation() {
+        let root = temp_dir("release-component-validation");
+        fs::write(
+            root.join("invalid.scene"),
+            "root:\n  name: Root\n  components:\n    - type: Animator\n",
+        )
+        .unwrap();
+        assert!(AssetDatabase::scan(&root).is_ok());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

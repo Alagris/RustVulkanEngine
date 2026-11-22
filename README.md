@@ -216,12 +216,12 @@ struct Animator {
 }
 ```
 
-The engine validates these constraints when loading scenes and prefabs. The
-editor's `AssetDatabase::scan` validates built-in component metadata; custom
-component metadata can be supplied with
-`AssetDatabase::scan_with_component_registry`. Register a custom component with
-`ComponentRegistry::register_with_metadata` so its requirements and uniqueness
-rules are available to validation.
+Component requirements and uniqueness are emitted as compile-time metadata by
+`#[derive(Component)]`. The editor checks those rules while scanning scene and
+prefab assets. Scene and prefab loading do not perform these development-time
+checks, and release builds compile out the validator. Runtime factories
+remain registered with `ComponentRegistry`; components that need GPU or
+material context are registered when the render loop is initialized.
 `ecs::Mesh`, `ecs::ProceduralMesh`, and `ecs::InstancedMesh` queue graphics API
 draw calls through their unified `update` callback. `Camera` is serializable
 and supplies the frame and cascaded-shadow uniforms.

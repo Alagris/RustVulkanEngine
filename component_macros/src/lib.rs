@@ -104,7 +104,10 @@ fn expand_component(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
         })?;
 
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-    let requirement_values = requirements.iter().map(|path| quote!(stringify!(#path)));
+    let requirement_values = requirements
+        .iter()
+        .map(|path| quote!(stringify!(#path)))
+        .collect::<Vec<_>>();
     Ok(quote! {
         impl #impl_generics ::std::ops::Deref for #name #ty_generics #where_clause {
             type Target = ::engine::ecs::component::ComponentInstance;
@@ -123,12 +126,17 @@ fn expand_component(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
         impl #impl_generics ::engine::ecs::component::ComponentMetadata
             for #name #ty_generics #where_clause
         {
-            fn required_components() -> &'static [&'static str] {
-                &[#(#requirement_values),*]
-            }
+            const TYPE_NAME: &'static str = stringify!(#name);
+            const REQUIRED_COMPONENTS: &'static [&'static str] = &[#(#requirement_values),*];
+            const UNIQUE: bool = #unique;
+        }
 
-            fn is_unique() -> bool {
-                #unique
+        #[cfg(debug_assertions)]
+        ::engine::ecs::component::inventory::submit! {
+            ::engine::ecs::component::ComponentRuleRegistration {
+                type_name: stringify!(#name),
+                required_components: &[#(#requirement_values),*],
+                unique: #unique,
             }
         }
     })

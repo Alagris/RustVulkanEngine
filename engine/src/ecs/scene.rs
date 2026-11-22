@@ -78,11 +78,8 @@ impl Scene {
     }
 
     pub fn from_yaml(source: &str, registry: &ComponentRegistry) -> Result<Self> {
-        let value: serde_yaml::Value =
-            serde_yaml::from_str(source).context("Failed to parse scene YAML")?;
-        registry.validate_component_constraints(&value)?;
         let definition: SceneDefinition =
-            serde_yaml::from_value(value).context("Failed to parse scene YAML")?;
+            serde_yaml::from_str(source).context("Failed to parse scene YAML")?;
         validate_timing(definition.delta_time, definition.time_since_start)?;
         let mut components = Vec::new();
         let root = build_game_object(definition.root, registry, &mut components)?;
@@ -403,11 +400,8 @@ impl Prefab {
     }
 
     pub fn from_yaml(source: &str, registry: &ComponentRegistry) -> Result<Self> {
-        let value: serde_yaml::Value =
-            serde_yaml::from_str(source).context("Failed to parse prefab YAML")?;
-        registry.validate_component_constraints(&value)?;
         let definition: SceneDefinition =
-            serde_yaml::from_value(value).context("Failed to parse prefab YAML")?;
+            serde_yaml::from_str(source).context("Failed to parse prefab YAML")?;
         validate_timing(definition.delta_time, definition.time_since_start)?;
         let mut components = Vec::new();
         let root = build_game_object(definition.root, registry, &mut components)?;
@@ -523,7 +517,7 @@ mod tests {
         let updates = Rc::new(Cell::new(0));
         let mut registry = ComponentRegistry::new();
         registry
-            .register_with_metadata::<LifecycleProbe>("Probe", {
+            .register_typed::<LifecycleProbe>("Probe", {
                 let awakes = Rc::clone(&awakes);
                 let starts = Rc::clone(&starts);
                 let updates = Rc::clone(&updates);
@@ -769,7 +763,7 @@ root:
         let mut registry = ComponentRegistry::new();
         let factory_calls = Rc::clone(&calls);
         registry
-            .register_with_metadata::<OwnerProbe>("OwnerProbe", move |_| {
+            .register_typed::<OwnerProbe>("OwnerProbe", move |_| {
                 Ok(OwnerProbe {
                     instance: ComponentInstance::default(),
                     calls: Rc::clone(&factory_calls),
@@ -831,6 +825,17 @@ root:
                 .get_component::<crate::ecs::Camera>(&scene)
                 .is_some()
         );
+    }
+
+    #[test]
+    fn runtime_scene_loading_does_not_validate_editor_component_rules() {
+        let registry = ComponentRegistry::new();
+        let scene = Scene::from_yaml(
+            "root:\n  name: Root\n  components:\n    - type: Camera\n    - type: Camera\n",
+            &registry,
+        )
+        .unwrap();
+        assert_eq!(scene.root.components.len(), 2);
     }
 
     #[crate::ecs::component]

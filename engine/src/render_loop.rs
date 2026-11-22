@@ -265,7 +265,7 @@ fn register_mesh_components(
     {
         let context = context.clone();
         let materials = Arc::clone(&materials);
-        registry.register_with_metadata::<Mesh>("Mesh", move |data| {
+        registry.register_typed::<Mesh>("Mesh", move |data| {
             let settings: PrimitiveMeshSettings = serde_yaml::from_value(data.clone())?;
             let material = get_material(&materials, &settings.material)?;
             let mesh = create_primitive_mesh(&context, material, &settings)?;
@@ -274,14 +274,14 @@ fn register_mesh_components(
     }
     {
         let materials = Arc::clone(&materials);
-        registry.register_with_metadata::<ProceduralMesh>("ProceduralMesh", move |data| {
+        registry.register_typed::<ProceduralMesh>("ProceduralMesh", move |data| {
             let settings: ProceduralMeshSettings = serde_yaml::from_value(data.clone())?;
             let material = get_material(&materials, &settings.material)?;
             ProceduralMesh::new(material, settings.vertices, settings.instances)
         })?;
     }
     {
-        registry.register_with_metadata::<InstancedMesh>("InstancedMesh", move |data| {
+        registry.register_typed::<InstancedMesh>("InstancedMesh", move |data| {
             let settings: InstancedMeshSettings = serde_yaml::from_value(data.clone())?;
             let material = get_material(&materials, &settings.primitive.material)?;
             let mesh = create_primitive_mesh(&context, material, &settings.primitive)?;

@@ -10,7 +10,8 @@ pub use crate::anim::AnimationClip;
 pub use animator::Animator;
 pub use camera::Camera;
 pub use component::{
-    Component, ComponentInstance, ComponentMetadata, ComponentRegistry, ComponentWeak,
+    Component, ComponentInstance, ComponentMetadata, ComponentRegistry, ComponentRuleRegistration,
+    ComponentWeak,
 };
 pub use component_macros::{Component, component};
 pub use game_object::{GameObject, GameObjectWeak};

@@ -1,6 +1,6 @@
 use crate::ecs::{GameObject, Scene};
 use crate::graphics::Graphics;
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use std::any::Any;
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashMap;
@@ -19,9 +19,19 @@ pub struct ComponentInstance {
 }
 
 pub trait ComponentMetadata {
-    fn required_components() -> &'static [&'static str];
-    fn is_unique() -> bool;
+    const TYPE_NAME: &'static str;
+    const REQUIRED_COMPONENTS: &'static [&'static str];
+    const UNIQUE: bool;
 }
+
+pub struct ComponentRuleRegistration {
+    pub type_name: &'static str,
+    pub required_components: &'static [&'static str],
+    pub unique: bool,
+}
+
+inventory::collect!(ComponentRuleRegistration);
+pub use inventory;
 
 impl Default for ComponentInstance {
     fn default() -> Self {
@@ -169,44 +179,21 @@ pub trait Component:
 
 type ComponentFactory = Arc<dyn Fn(&serde_yaml::Value) -> Result<Box<dyn Component>>>;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct ComponentRules {
-    required: &'static [&'static str],
-    unique: bool,
-}
-
 pub struct ComponentRegistry {
     factories: HashMap<String, ComponentFactory>,
-    rules: HashMap<String, ComponentRules>,
 }
 
 impl Default for ComponentRegistry {
     fn default() -> Self {
         let mut registry = Self {
             factories: HashMap::new(),
-            rules: HashMap::new(),
         };
         registry
-            .register_with_metadata::<crate::ecs::Camera>("Camera", |data| {
+            .register_typed::<crate::ecs::Camera>("Camera", |data| {
                 serde_yaml::from_value(data.clone())
                     .map_err(|error| anyhow!("invalid Camera component data: {error}"))
             })
             .expect("built-in Camera component type is unique");
-        registry
-            .register_metadata::<crate::ecs::Animator>("Animator")
-            .expect("built-in Animator component type is unique");
-        registry
-            .register_metadata::<crate::ecs::Mesh>("Mesh")
-            .expect("built-in Mesh component type is unique");
-        registry
-            .register_metadata::<crate::ecs::ProceduralMesh>("ProceduralMesh")
-            .expect("built-in ProceduralMesh component type is unique");
-        registry
-            .register_metadata::<crate::ecs::InstancedMesh>("InstancedMesh")
-            .expect("built-in InstancedMesh component type is unique");
-        registry
-            .register_metadata::<crate::ecs::SkinnedMesh>("SkinnedMesh")
-            .expect("built-in SkinnedMesh component type is unique");
         registry
     }
 }
@@ -235,7 +222,7 @@ impl ComponentRegistry {
         Ok(())
     }
 
-    pub fn register_with_metadata<T: Component + ComponentMetadata + 'static>(
+    pub fn register_typed<T: Component + 'static>(
         &mut self,
         type_name: impl Into<String>,
         factory: impl Fn(&serde_yaml::Value) -> Result<T> + 'static,
@@ -250,117 +237,12 @@ impl ComponentRegistry {
                 type_name
             ));
         }
-        self.register_metadata::<T>(&type_name)?;
         self.factories.insert(
             type_name,
             Arc::new(move |data| {
                 factory(data).map(|component| Box::new(component) as Box<dyn Component>)
             }),
         );
-        Ok(())
-    }
-
-    pub fn register_metadata<T: ComponentMetadata + 'static>(
-        &mut self,
-        type_name: impl Into<String>,
-    ) -> Result<()> {
-        let type_name = type_name.into();
-        if type_name.trim().is_empty() {
-            return Err(anyhow!("component type names must not be empty"));
-        }
-        let rules = ComponentRules {
-            required: T::required_components(),
-            unique: T::is_unique(),
-        };
-        if let Some(existing) = self.rules.get(&type_name) {
-            if *existing != rules {
-                return Err(anyhow!(
-                    "component metadata for '{}' was registered more than once",
-                    type_name
-                ));
-            }
-            return Ok(());
-        }
-        self.rules.insert(type_name, rules);
-        Ok(())
-    }
-
-    pub fn validate_component_constraints(&self, scene: &serde_yaml::Value) -> Result<()> {
-        let root = scene
-            .get("root")
-            .ok_or_else(|| anyhow!("scene or prefab must contain a root game object"))?;
-        self.validate_game_object(root, "root")
-    }
-
-    fn validate_game_object(&self, object: &serde_yaml::Value, path: &str) -> Result<()> {
-        let name = object
-            .get("name")
-            .and_then(serde_yaml::Value::as_str)
-            .ok_or_else(|| anyhow!("{path} must have a string name"))?;
-        let object_path = format!("{path} ({name})");
-        let empty_components = Vec::new();
-        let components = match object.get("components") {
-            Some(components) => components
-                .as_sequence()
-                .ok_or_else(|| anyhow!("{object_path} components must be a sequence"))?,
-            None => &empty_components,
-        };
-        let component_types = components
-            .iter()
-            .map(|component| {
-                component
-                    .get("type")
-                    .and_then(serde_yaml::Value::as_str)
-                    .map(str::to_owned)
-                    .ok_or_else(|| {
-                        anyhow!("{object_path} contains a component without a string type")
-                    })
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        for component_type in &component_types {
-            let Some(rules) = self.rules.get(component_type) else {
-                continue;
-            };
-            if rules.unique
-                && component_types
-                    .iter()
-                    .filter(|candidate| *candidate == component_type)
-                    .count()
-                    > 1
-            {
-                bail!(
-                    "{object_path} contains more than one unique component '{}'",
-                    component_type
-                );
-            }
-            for requirement in rules.required {
-                let required_name = requirement
-                    .rsplit("::")
-                    .next()
-                    .unwrap_or(requirement)
-                    .trim();
-                if !component_types
-                    .iter()
-                    .any(|candidate| candidate == required_name)
-                {
-                    bail!(
-                        "{object_path} component '{}' requires component '{}'",
-                        component_type,
-                        required_name
-                    );
-                }
-            }
-        }
-
-        if let Some(children) = object.get("children") {
-            let children = children
-                .as_sequence()
-                .ok_or_else(|| anyhow!("{object_path} children must be a sequence"))?;
-            for (index, child) in children.iter().enumerate() {
-                self.validate_game_object(child, &format!("{object_path}.children[{index}]"))?;
-            }
-        }
         Ok(())
     }
 
@@ -387,27 +269,15 @@ mod tests {
     struct NeedsCameraAndMesh {}
 
     #[test]
-    fn validates_multiple_required_component_types() {
-        let mut registry = ComponentRegistry::new();
-        registry
-            .register_metadata::<NeedsCameraAndMesh>("NeedsCameraAndMesh")
-            .unwrap();
-        let missing_mesh: serde_yaml::Value = serde_yaml::from_str(
-            "root:\n  name: Root\n  components:\n    - type: NeedsCameraAndMesh\n    - type: Camera\n",
-        )
-        .unwrap();
-        assert!(
-            registry
-                .validate_component_constraints(&missing_mesh)
-                .unwrap_err()
-                .to_string()
-                .contains("requires component 'Mesh'")
+    fn component_rules_are_compile_time_metadata() {
+        let _component = NeedsCameraAndMesh {
+            instance: ComponentInstance::default(),
+        };
+        assert_eq!(NeedsCameraAndMesh::TYPE_NAME, "NeedsCameraAndMesh");
+        assert_eq!(
+            NeedsCameraAndMesh::REQUIRED_COMPONENTS,
+            &["Camera", "crate :: ecs :: Mesh"]
         );
-
-        let complete: serde_yaml::Value = serde_yaml::from_str(
-            "root:\n  name: Root\n  components:\n    - type: NeedsCameraAndMesh\n    - type: Camera\n    - type: Mesh\n",
-        )
-        .unwrap();
-        registry.validate_component_constraints(&complete).unwrap();
+        assert!(!NeedsCameraAndMesh::UNIQUE);
     }
 }

@@ -19,6 +19,7 @@ vulkanalia.workspace = true
 winit.workspace = true
 fbx-reader = "0.1.0"
 component_macros = { path = "../component_macros" }
+inventory = "0.3"
 
 [build-dependencies]
 lalrpop = "0.22"
