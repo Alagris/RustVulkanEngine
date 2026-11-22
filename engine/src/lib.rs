@@ -19,4 +19,5 @@ pub mod settings;
 pub use app::App;
 pub use graphics::{FrameUniform, Graphics};
 pub use material::{Material, ShaderPass};
+pub use physx_safe as physics;
 pub use render_pipeline::RenderPipeline;

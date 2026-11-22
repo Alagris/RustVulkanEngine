@@ -92,6 +92,18 @@ impl InputSystem {
         self.maps.iter().map(|map| map.name.as_str()).collect()
     }
 
+    pub fn binding_type(&self, map: &str, binding: &str) -> Result<InputType> {
+        let index = *self
+            .map_indices
+            .get(map)
+            .ok_or_else(|| anyhow!("input map '{map}' does not exist"))?;
+        self.maps[index]
+            .bindings
+            .get(binding)
+            .map(|binding| binding.output_type)
+            .ok_or_else(|| anyhow!("input binding '{binding}' does not exist in map '{map}'"))
+    }
+
     pub(crate) fn set_active_map(&mut self, name: &str) -> Result<Vec<InputNotification>> {
         let next = *self
             .map_indices

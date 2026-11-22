@@ -7,3 +7,10 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 editor = { path = "../editor" }
+engine = { path = "../engine" }
+glam.workspace = true
+cgmath.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+winit.workspace = true

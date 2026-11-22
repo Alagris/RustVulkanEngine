@@ -557,6 +557,7 @@ dependencies = [
  "lalrpop",
  "lalrpop-util",
  "log",
+ "physx-safe",
  "serde",
  "serde_yaml",
  "shaderc",
@@ -682,7 +683,12 @@ name = "game"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cgmath",
  "editor",
+ "engine",
+ "glam 0.30.10",
+ "serde",
+ "winit",
 ]
 
 [[package]]

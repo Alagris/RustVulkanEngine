@@ -1,3 +1,5 @@
+mod player_controller;
+
 fn main() -> anyhow::Result<()> {
     let settings = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("settings.yaml");
     editor::cli::run_cli(settings)

@@ -1,3 +1,5 @@
 pipeline: pipeline.pipe
 default_scene: game.scene
 editor_scene: editor.scene
+input_asset: PlayerControls
+active_input_map: Gameplay

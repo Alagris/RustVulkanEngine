@@ -1,0 +1,23 @@
+type: Input
+name: PlayerControls
+data:
+  keymaps:
+    Gameplay:
+      type: KeyMap
+      data:
+        bindings:
+          forward:
+            type: KeyBinding
+            data: { key: 41, input_type: Bool }
+          back:
+            type: KeyBinding
+            data: { key: 37, input_type: Bool }
+          left:
+            type: KeyBinding
+            data: { key: 19, input_type: Bool }
+          right:
+            type: KeyBinding
+            data: { key: 22, input_type: Bool }
+          look:
+            type: KeyBinding
+            data: { key: 65536, input_type: Vector2 }

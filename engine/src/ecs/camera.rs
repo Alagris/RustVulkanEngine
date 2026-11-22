@@ -1,5 +1,5 @@
+use crate::ecs::Component;
 use crate::ecs::component::ComponentInstance;
-use crate::ecs::{Component, GameObject, Scene};
 use crate::graphics::FrameUniform;
 use anyhow::{Result, bail};
 use glam::{Mat4, Vec3, Vec4};
@@ -145,10 +145,6 @@ impl Component for Camera {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
-    }
-
-    fn start(&mut self, _scene: &Scene, _game_object: &GameObject) -> bool {
-        false
     }
 }
 

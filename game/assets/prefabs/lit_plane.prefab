@@ -13,3 +13,7 @@ root:
         depth: 12.0
         segments_x: 8
         segments_z: 8
+    - id: collider
+      type: BoxCollider
+      data:
+        half_extents: [6.0, 0.05, 6.0]

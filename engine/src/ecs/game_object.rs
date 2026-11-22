@@ -1,9 +1,8 @@
 use crate::ecs::component::{ComponentWeak, Unique, UniqueRc};
-use crate::ecs::game_object_serde::is_finite_transform;
-use crate::ecs::{Component, Scene};
+use crate::ecs::{Component, Scene, TransformDefinition};
 use crate::graphics::Transform;
-use anyhow::{Result, bail};
-use cgmath::{Matrix4, SquareMatrix};
+use anyhow::Result;
+use cgmath::{Matrix4, SquareMatrix, Vector3};
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,7 +32,8 @@ static NEXT_GAME_OBJECT_ID: AtomicU64 = AtomicU64::new(1);
 pub struct GameObject {
     id: u64,
     pub name: String,
-    transform: Cell<Transform>,
+    transform: Cell<TransformDefinition>,
+    parent_transform: Cell<Transform>,
     world_transform: Cell<Transform>,
     children: Vec<Unique<GameObject>>,
     pub(crate) components: Vec<UniqueRc<dyn Component>>,
@@ -42,7 +42,7 @@ pub struct GameObject {
 impl GameObject {
     pub(crate) fn new(
         name: String,
-        transform: Transform,
+        transform: TransformDefinition,
         children: Vec<Unique<GameObject>>,
     ) -> Unique<GameObject> {
         assert!(
@@ -53,14 +53,17 @@ impl GameObject {
             id: NEXT_GAME_OBJECT_ID.fetch_add(1, Ordering::Relaxed),
             name,
             transform: Cell::new(transform),
-            world_transform: Cell::new(transform),
+            parent_transform: Cell::new(Matrix4::identity()),
+            world_transform: Cell::new(
+                transform.to_transform().expect("validated local transform"),
+            ),
             children,
             components: Vec::new(),
         }))
     }
 
     pub fn empty(name: impl Into<String>) -> Unique<GameObject> {
-        Self::new(name.into(), Matrix4::identity(), Vec::new())
+        Self::new(name.into(), TransformDefinition::default(), Vec::new())
     }
 
     pub fn id(&self) -> u64 {
@@ -74,19 +77,30 @@ impl GameObject {
         }
     }
 
-    pub fn set_transform(&self, transform: Transform) -> Result<()> {
-        if !is_finite_transform(transform) || transform.determinant().abs() <= f32::EPSILON {
-            bail!("game object transforms must be finite and invertible");
-        }
+    pub fn set_transform(&self, transform: TransformDefinition) -> Result<()> {
+        transform.to_transform()?;
         self.transform.set(transform);
+        self.update_world_transforms(self.parent_transform.get());
         Ok(())
+    }
+
+    pub fn set_world_translation(&self, translation: Vector3<f32>) -> Result<()> {
+        let parent_inverse = self
+            .parent_transform
+            .get()
+            .invert()
+            .ok_or_else(|| anyhow::anyhow!("parent transform is not invertible"))?;
+        let local = parent_inverse * translation.extend(1.0);
+        let mut transform = self.transform();
+        transform.translation = local.truncate();
+        self.set_transform(transform)
     }
 
     pub fn world_transform(&self) -> Transform {
         self.world_transform.get()
     }
 
-    pub fn transform(&self) -> Transform {
+    pub fn transform(&self) -> TransformDefinition {
         self.transform.get()
     }
 
@@ -99,6 +113,9 @@ impl GameObject {
     }
 
     pub fn add_child(&mut self, child: Unique<GameObject>) {
+        child
+            .borrow()
+            .update_world_transforms(self.world_transform.get());
         self.children.push(child);
     }
 
@@ -169,7 +186,13 @@ impl GameObject {
     }
 
     pub(crate) fn update_world_transforms(&self, parent_transform: Transform) {
-        let world_transform = parent_transform * self.transform.get();
+        self.parent_transform.set(parent_transform);
+        let world_transform = parent_transform
+            * self
+                .transform
+                .get()
+                .to_transform()
+                .expect("validated local transform");
         self.world_transform.set(world_transform);
         for child in &self.children {
             child.borrow().update_world_transforms(world_transform);
@@ -216,5 +239,40 @@ impl GameObject {
             .children
             .iter()
             .any(|child| Self::contains(child, target))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cgmath::{Quaternion, Rad, Rotation3};
+
+    #[test]
+    fn local_trs_stays_editable_and_updates_hierarchy() {
+        let parent = GameObject::empty("Parent");
+        let child = GameObject::empty("Child");
+        parent.borrow_mut().add_child(Rc::clone(&child));
+        parent
+            .borrow()
+            .set_transform(TransformDefinition {
+                translation: Vector3::new(4.0, 0.0, 0.0),
+                rotation: Quaternion::from_angle_y(Rad(std::f32::consts::FRAC_PI_2)),
+                ..Default::default()
+            })
+            .unwrap();
+        let mut local = child.borrow().transform();
+        local.translation = Vector3::new(0.0, 0.0, 2.0);
+        child.borrow().set_transform(local).unwrap();
+        assert!((child.borrow().world_transform().w.x - 6.0).abs() < 1.0e-5);
+        child
+            .borrow()
+            .set_world_translation(Vector3::new(4.0, 0.0, -3.0))
+            .unwrap();
+        assert!((child.borrow().transform().translation.x - 3.0).abs() < 1.0e-5);
+        let previous = child.borrow().transform();
+        let mut invalid = previous;
+        invalid.scale.x = 0.0;
+        assert!(child.borrow().set_transform(invalid).is_err());
+        assert_eq!(child.borrow().transform(), previous);
     }
 }

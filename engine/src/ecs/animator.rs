@@ -61,9 +61,16 @@ impl Component for Animator {
         self
     }
 
-    fn start(&mut self, _scene: &Scene, game_object: &GameObject) -> bool {
+    fn try_start(
+        &mut self,
+        _scene: &Scene,
+        game_object: &GameObject,
+    ) -> Result<crate::ecs::Features> {
         self.skinned_mesh = game_object.get_component_weak::<SkinnedMesh>();
-        true
+        Ok(crate::ecs::Features {
+            updatable: true,
+            ..Default::default()
+        })
     }
 
     fn update(

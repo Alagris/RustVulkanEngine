@@ -7,19 +7,19 @@ root:
     rotation: [0.0, 0.0, 0.0, 1.0]
     scale: [1.0, 1.0, 1.0]
   components:
-    - type: Camera
-      data:
-        position: [0.0, 3.0, 5.0]
-        target: [0.0, 0.0, 0.0]
-        up: [0.0, 1.0, 0.0]
-        fov_y: 1.0471976
-        near: 0.1
-        far: 50.0
     - type: DirectionalLight
       data:
         direction: [-0.4, -1.0, -0.5]
         color: [1.0, 0.92, 0.8]
         intensity: 1.0
   children:
+    - name: Player
+      transform:
+        translation: [0.0, 0.3, 5.0]
+      components:
+        - type: CharacterController
+        - type: Camera
+        - type: CameraFollow
+        - type: PlayerController
     - prefab: lit_cube
     - prefab: lit_plane

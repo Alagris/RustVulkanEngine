@@ -3,10 +3,12 @@ use crate::ecs::component::{ComponentRegistry, Unique, component_ref};
 use crate::ecs::game_object::{GameObject, GameObjectWeak};
 use crate::ecs::game_object_serde::GameObjectDefinition;
 use crate::ecs::scene_serde::SceneDefinition;
+use crate::ecs::weak_component_list::WeakComponentList;
 use crate::graphics::Graphics;
 use crate::input::{InputCallback, InputSystem, RawInput};
 use anyhow::{Context, Result, anyhow, bail};
 use cgmath::{Matrix4, SquareMatrix};
+use physx_safe::PhysicsWorld;
 use std::any::TypeId;
 use std::cell::{Cell, RefCell};
 use std::fs;
@@ -31,12 +33,16 @@ enum PendingMutation {
 pub struct Scene {
     pub root: Unique<GameObject>,
     pub(crate) components: Vec<Weak<RefCell<dyn Component>>>,
+    update_components: WeakComponentList,
+    physics_components: WeakComponentList,
+    late_components: WeakComponentList,
     delta_time: Cell<f32>,
     time_since_start: Cell<f32>,
     initialized: Cell<bool>,
     destroyed: Cell<bool>,
     pending_mutations: RefCell<Vec<PendingMutation>>,
     input_system: RefCell<InputSystem>,
+    pub(crate) physics: Rc<crate::ecs::collider::ScenePhysics>,
 }
 
 impl Scene {
@@ -63,12 +69,16 @@ impl Scene {
         Ok(Self {
             root,
             components,
+            update_components: WeakComponentList::default(),
+            physics_components: WeakComponentList::default(),
+            late_components: WeakComponentList::default(),
             delta_time: Cell::new(definition.delta_time),
             time_since_start: Cell::new(definition.time_since_start),
             initialized: Cell::new(false),
             destroyed: Cell::new(false),
             pending_mutations: RefCell::new(Vec::new()),
             input_system: RefCell::new(InputSystem::default()),
+            physics: Rc::new(crate::ecs::collider::ScenePhysics::default()),
         })
     }
 
@@ -77,7 +87,12 @@ impl Scene {
             !self.initialized.get(),
             "scene lifecycle must be initialized once"
         );
+        self.root
+            .borrow()
+            .update_world_transforms(Matrix4::identity());
         self.initialize_components()?;
+        self.sync_physics()?;
+        self.late_update_components()?;
         self.initialized.set(true);
         self.apply_pending_mutations()
     }
@@ -120,42 +135,26 @@ impl Scene {
         self.root
             .borrow()
             .update_world_transforms(Matrix4::identity());
+        self.sync_physics()?;
+        if delta_time > 0.0 && self.physics.world.borrow().is_some() {
+            self.with_physics(|physics| {
+                physics.step(delta_time)?;
+                Ok(())
+            })?;
+        }
         let input_notifications = self.input_system.borrow_mut().update(delta_time)?;
         // The RefMut ends at the previous statement, so callbacks may re-enter input APIs.
         InputSystem::dispatch(self, input_notifications)?;
-        let mut write_index = 0;
-        let mut update_error = None;
-        for read_index in 0..self.components.len() {
-            let component_ref = self.components[read_index].clone();
-            let Some(component) = component_ref.upgrade() else {
-                continue;
-            };
-            if update_error.is_none() {
-                let result = (|| {
-                    let mut component = component.borrow_mut();
-                    if component.started && component.updates {
-                        let owner = component
-                            .owner
-                            .upgrade()
-                            .ok_or_else(|| anyhow!("component owner no longer exists"))?;
-                        component.update(self, &owner.borrow(), graphics)?;
-                    }
-                    Ok(())
-                })();
-                if let Err(error) = result {
-                    update_error = Some(error);
-                }
-            }
-            self.components[write_index] = component_ref;
-            write_index += 1;
-        }
-        self.components.truncate(write_index);
-        if let Some(error) = update_error {
-            return Err(error);
-        }
+        let result = self
+            .update_components
+            .iterate_and_remove_invalid(|component, owner| component.update(self, owner, graphics));
+        self.components
+            .retain(|component| component.upgrade().is_some());
+        result?;
         if !self.pending_mutations.borrow().is_empty() {
             self.apply_pending_mutations()?;
         }
+        self.late_update_components()?;
         Ok(())
     }
 
@@ -313,17 +312,28 @@ impl Scene {
                 continue;
             };
             let mut component = component.borrow_mut();
-            if component.awoken {
+            if component.started {
                 continue;
             }
             let owner = component
                 .owner
                 .upgrade()
                 .ok_or_else(|| anyhow!("component owner no longer exists"))?;
-            component.awoken = true;
-            component.awake(self, &owner.borrow());
-            component.updates = component.start(self, &owner.borrow());
+            if !component.awoken {
+                component.awoken = true;
+                component.awake(self, &owner.borrow());
+            }
+            let features = component.try_start(self, &owner.borrow())?;
             component.started = true;
+            if features.updatable {
+                self.update_components.push(component_ref.clone());
+            }
+            if features.has_physics {
+                self.physics_components.push(component_ref.clone());
+            }
+            if features.late_update {
+                self.late_components.push(component_ref.clone());
+            }
         }
         Ok(())
     }
@@ -332,16 +342,48 @@ impl Scene {
         self.delta_time.get()
     }
 
+    fn sync_physics(&self) -> Result<()> {
+        self.physics_components
+            .iterate_and_remove_invalid(|component, owner| component.sync_physics(self, owner))
+    }
+
+    fn late_update_components(&self) -> Result<()> {
+        self.late_components
+            .iterate_and_remove_invalid(|component, owner| component.late_update(self, owner))
+    }
+
+    /// Run an operation on this scene's lazily created, thread-affine physics world.
+    pub fn with_physics<R>(
+        &self,
+        operation: impl FnOnce(&mut PhysicsWorld) -> Result<R>,
+    ) -> Result<R> {
+        let mut physics = self
+            .physics
+            .world
+            .try_borrow_mut()
+            .map_err(|_| anyhow!("scene physics is already borrowed"))?;
+        if physics.is_none() {
+            *physics = Some(PhysicsWorld::new(glam::Vec3::new(0.0, -9.81, 0.0))?);
+        }
+        let physics = physics.as_mut().expect("physics world was initialized");
+        self.physics.flush_removals(physics)?;
+        let result = operation(physics);
+        let cleanup = self.physics.flush_removals(physics);
+        match (result, cleanup) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(cleanup)) => {
+                Err(error.context(format!("collider cleanup also failed: {cleanup:#}")))
+            }
+        }
+    }
+
     pub fn time_since_start(&self) -> f32 {
         self.time_since_start.get()
     }
 
     pub fn update_component_count(&self) -> usize {
-        self.components
-            .iter()
-            .filter_map(Weak::upgrade)
-            .filter(|component| component.borrow().updates)
-            .count()
+        self.update_components.live_count()
     }
 
     pub fn component_count(&self) -> usize {
@@ -401,6 +443,10 @@ impl Scene {
 
     pub fn active_input_map(&self) -> Option<String> {
         self.input_system.borrow().active_map().map(str::to_owned)
+    }
+
+    pub fn input_binding_type(&self, map: &str, binding: &str) -> Result<crate::input::InputType> {
+        self.input_system.borrow().binding_type(map, binding)
     }
 
     pub fn set_active_input_map(&self, name: &str) -> Result<()> {
@@ -494,7 +540,10 @@ fn build_game_object(
     }
     let object = GameObject::new(
         definition.name,
-        definition.transform.to_transform()?,
+        {
+            definition.transform.to_transform()?;
+            definition.transform
+        },
         Vec::new(),
     );
     for component_definition in definition.components {
@@ -577,9 +626,16 @@ mod tests {
         fn awake(&mut self, _scene: &Scene, _game_object: &GameObject) {
             self.awakes.set(self.awakes.get() + 1);
         }
-        fn start(&mut self, _scene: &Scene, _game_object: &GameObject) -> bool {
+        fn try_start(
+            &mut self,
+            _scene: &Scene,
+            _game_object: &GameObject,
+        ) -> Result<crate::ecs::Features> {
             self.starts.set(self.starts.get() + 1);
-            self.update_enabled
+            Ok(crate::ecs::Features {
+                updatable: self.update_enabled,
+                ..Default::default()
+            })
         }
         fn update(
             &mut self,
@@ -621,9 +677,16 @@ mod tests {
         fn awake(&mut self, _scene: &Scene, game_object: &GameObject) {
             self.calls.borrow_mut().push(("awake", game_object.id()));
         }
-        fn start(&mut self, _scene: &Scene, game_object: &GameObject) -> bool {
+        fn try_start(
+            &mut self,
+            _scene: &Scene,
+            game_object: &GameObject,
+        ) -> Result<crate::ecs::Features> {
             self.calls.borrow_mut().push(("start", game_object.id()));
-            true
+            Ok(crate::ecs::Features {
+                updatable: true,
+                ..Default::default()
+            })
         }
         fn update(
             &mut self,
@@ -644,6 +707,123 @@ mod tests {
         fn as_any_mut(&mut self) -> &mut dyn Any {
             self
         }
+    }
+
+    #[crate::ecs::component]
+    #[derive(crate::ecs::Component)]
+    struct FeatureProbe {
+        features: crate::ecs::Features,
+        label: &'static str,
+        calls: Rc<RefCell<Vec<(&'static str, &'static str)>>>,
+    }
+
+    impl Component for FeatureProbe {
+        fn try_start(&mut self, _: &Scene, _: &GameObject) -> Result<crate::ecs::Features> {
+            Ok(self.features)
+        }
+        fn sync_physics(&mut self, _: &Scene, _: &GameObject) -> Result<()> {
+            self.calls.borrow_mut().push((self.label, "physics"));
+            Ok(())
+        }
+        fn update(&mut self, _: &Scene, _: &GameObject, _: &mut Graphics) -> Result<()> {
+            self.calls.borrow_mut().push((self.label, "update"));
+            Ok(())
+        }
+        fn late_update(&mut self, _: &Scene, _: &GameObject) -> Result<()> {
+            self.calls.borrow_mut().push((self.label, "late"));
+            Ok(())
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+    }
+
+    #[test]
+    fn feature_flags_select_phases_and_removed_components_are_pruned() {
+        let mut scene =
+            Scene::from_yaml("root:\n  name: Root\n", &ComponentRegistry::new()).unwrap();
+        scene.initialize().unwrap();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        for (label, features) in [
+            (
+                "update",
+                crate::ecs::Features {
+                    updatable: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "physics",
+                crate::ecs::Features {
+                    has_physics: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "late",
+                crate::ecs::Features {
+                    late_update: true,
+                    ..Default::default()
+                },
+            ),
+            ("none", crate::ecs::Features::default()),
+            (
+                "all",
+                crate::ecs::Features {
+                    updatable: true,
+                    has_physics: true,
+                    late_update: true,
+                },
+            ),
+        ] {
+            scene
+                .root
+                .borrow()
+                .add_component(
+                    &scene,
+                    Box::new(FeatureProbe {
+                        instance: ComponentInstance::default(),
+                        features,
+                        label,
+                        calls: Rc::clone(&calls),
+                    }),
+                )
+                .unwrap();
+        }
+        scene.update(0.1, &mut Graphics::default()).unwrap();
+        calls.borrow_mut().clear();
+        scene.update(0.1, &mut Graphics::default()).unwrap();
+        assert_eq!(
+            &*calls.borrow(),
+            &[
+                ("physics", "physics"),
+                ("all", "physics"),
+                ("update", "update"),
+                ("all", "update"),
+                ("late", "late"),
+                ("all", "late"),
+            ]
+        );
+        scene
+            .remove_component::<FeatureProbe>(&scene.root.borrow())
+            .unwrap();
+        scene.update(0.1, &mut Graphics::default()).unwrap();
+        calls.borrow_mut().clear();
+        scene.update(0.1, &mut Graphics::default()).unwrap();
+        assert_eq!(
+            &*calls.borrow(),
+            &[
+                ("physics", "physics"),
+                ("all", "physics"),
+                ("all", "update"),
+                ("late", "late"),
+                ("all", "late"),
+            ]
+        );
+        assert_eq!(scene.update_component_count(), 1);
     }
 
     fn registry(
@@ -799,14 +979,14 @@ root:
         );
         scene
             .defer_game_object_mutation(&target, |target| {
-                target
-                    .set_transform(Matrix4::from_translation(Vector3::new(1.0, 0.0, 0.0)))
-                    .unwrap();
+                let mut transform = target.transform();
+                transform.translation = Vector3::new(1.0, 0.0, 0.0);
+                target.set_transform(transform).unwrap();
             })
             .unwrap();
         scene.update(0.016, &mut Graphics::default()).unwrap();
         let target = target.upgrade().unwrap();
-        assert_eq!(target.borrow().transform().w.x, 1.0);
+        assert_eq!(target.borrow().transform().translation.x, 1.0);
     }
 
     #[test]

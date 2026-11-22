@@ -260,12 +260,16 @@ Wheel values are `-1` or `1`.
 Scene and prefab YAML share the same root object format. A scene can provide
 `deltaTime`, `timeSinceStart`, a root object, children, transforms, and typed
 component data. The engine initializes components in two phases (`awake`,
-then `start`); components whose `start` returns `true` receive `update` each
+then `try_start`); its `Features` result selects the `update`, `sync_physics`
+and `late_update` callbacks the component receives each
 frame. `update` now also receives the owning `GameObject` and `Graphics`, so
-rendering and component updates happen in one callback. `awake`, `start`, and
+rendering and component updates happen in one callback. `awake`, `try_start`, and
 `destroy` also receive their owning object.
 
 Components can change an object's transform through `GameObject::set_transform`.
+The local `TransformDefinition` exposes translation, quaternion rotation and
+scale; `world_transform()` is the composed matrix. `set_world_translation`
+converts a world-space position into the object's parent space.
 For changes to another object, use
 `Scene::defer_game_object_mutation(object_id, |object| ...)`. Components are strongly owned by their `GameObject`; the scene keeps weak
 references for component and object traversal, compacting expired references
@@ -278,6 +282,45 @@ component-update traversal.
 Parents own their child objects directly. `GameObject::weak_reference` creates
 a non-owning handle that can be resolved through `Scene::resolve_game_object`;
 the scene prunes expired object handles during update.
+
+### Physics and camera follow
+
+Scenes create a thread-affine physics world on demand. `SphereCollider`,
+`BoxCollider`, `CapsuleCollider` (Y-axis), and `PlaneCollider` are static
+colliders; their geometry, material and local `center` are synchronized with
+the owner's world transform. A plane's local normal points along +X. The
+`CharacterController` owns an upright capsule and `move_by` performs
+collide-and-slide movement, updates the game object's position, and returns
+contact flags. Callers must supply gravity themselves.
+
+All collider components implement `Collider`, whose primitive associated type
+identifies the shape. Custom components can store `PhysicsCollider<Primitive>`,
+return `Features { has_physics: true, ..Default::default() }` from `try_start`,
+call `sync_static` from `sync_physics`, and call `remove` from `destroy`.
+`Scene::with_physics` provides access to the underlying world. Invalid or
+sheared physics transforms are reported as errors. Spheres require uniform
+scale, and capsules require equal X/Z scale. Changed dimensions and scale
+recreate the native collider; mesh colliders, in-place resizing, scene queries,
+and collision filtering remain unavailable.
+
+Add `Camera` and `CameraFollow` to the followed object. First-person follow
+snaps to the object's orientation; orbital follow can be configured with
+mode-specific distance and damping:
+
+```yaml
+- type: CameraFollow
+  data:
+    offset: [0.0, 0.6, 0.0]
+    mode:
+      type: orbit
+      distance: 4.0
+      damping: 5.0
+```
+
+The sample game's `PlayerController` requires `CharacterController`,
+`CameraFollow`, and `Camera` on the same object. Its `Gameplay` input map
+provides WASD movement and mouse look; the controller supplies gravity.
+Orbit cameras do not yet avoid obstructions.
 
 Use the `#[component]` attribute with `#[derive(Component)]` to inject the
 `ComponentInstance` field (marked `#[serde(skip)]` when the type derives serde)

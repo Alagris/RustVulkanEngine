@@ -14,19 +14,19 @@ pub(crate) struct GameObjectDefinition {
     pub(crate) children: Vec<GameObjectDefinition>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
 #[serde(default)]
-pub(crate) struct TransformDefinition {
+pub struct TransformDefinition {
     #[serde(with = "vector3_serde")]
-    pub(crate) translation: Vector3<f32>,
+    pub translation: Vector3<f32>,
     #[serde(with = "quaternion_serde")]
-    pub(crate) rotation: Quaternion<f32>,
+    pub rotation: Quaternion<f32>,
     #[serde(with = "vector3_serde")]
-    pub(crate) scale: Vector3<f32>,
+    pub scale: Vector3<f32>,
 }
 
 impl TransformDefinition {
-    pub(crate) fn to_transform(self) -> Result<Transform> {
+    pub fn to_transform(self) -> Result<Transform> {
         if !self.translation.x.is_finite()
             || !self.translation.y.is_finite()
             || !self.translation.z.is_finite()
@@ -50,8 +50,9 @@ impl TransformDefinition {
         let transform = Matrix4::from_translation(self.translation)
             * Matrix4::from(self.rotation.normalize())
             * Matrix4::from_nonuniform_scale(self.scale.x, self.scale.y, self.scale.z);
-        if !is_finite_transform(transform) {
-            bail!("game object transform must be finite");
+        use cgmath::SquareMatrix;
+        if !is_finite_transform(transform) || transform.determinant().abs() <= f32::EPSILON {
+            bail!("game object transforms must be finite and invertible");
         }
         Ok(transform)
     }

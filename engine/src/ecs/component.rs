@@ -14,8 +14,15 @@ pub struct ComponentInstance {
     pub(crate) owner: Weak<RefCell<GameObject>>,
     pub(crate) awoken: bool,
     pub(crate) started: bool,
-    pub(crate) updates: bool,
     component: Option<Weak<RefCell<dyn Component>>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Lifecycle callbacks requested by a component at startup.
+pub struct Features {
+    pub updatable: bool,
+    pub has_physics: bool,
+    pub late_update: bool,
 }
 
 pub trait ComponentMetadata {
@@ -58,7 +65,6 @@ impl Default for ComponentInstance {
             owner: Weak::new(),
             awoken: false,
             started: false,
-            updates: false,
             component: None,
         }
     }
@@ -79,7 +85,6 @@ impl fmt::Debug for ComponentInstance {
             .field("owner_id", &self.owner_id)
             .field("awoken", &self.awoken)
             .field("started", &self.started)
-            .field("updates", &self.updates)
             .finish()
     }
 }
@@ -162,8 +167,16 @@ impl Component for ComponentSlot {
         self.0.awake(scene, game_object);
     }
 
-    fn start(&mut self, scene: &Scene, game_object: &GameObject) -> bool {
-        self.0.start(scene, game_object)
+    fn try_start(&mut self, scene: &Scene, game_object: &GameObject) -> Result<Features> {
+        self.0.try_start(scene, game_object)
+    }
+
+    fn sync_physics(&mut self, scene: &Scene, game_object: &GameObject) -> Result<()> {
+        self.0.sync_physics(scene, game_object)
+    }
+
+    fn late_update(&mut self, scene: &Scene, game_object: &GameObject) -> Result<()> {
+        self.0.late_update(scene, game_object)
     }
 
     fn update(
@@ -192,8 +205,14 @@ pub trait Component:
     Any + Deref<Target = ComponentInstance> + DerefMut<Target = ComponentInstance>
 {
     fn awake(&mut self, _scene: &Scene, _game_object: &GameObject) {}
-    fn start(&mut self, _scene: &Scene, _game_object: &GameObject) -> bool {
-        false
+    fn try_start(&mut self, _scene: &Scene, _game_object: &GameObject) -> Result<Features> {
+        Ok(Features::default())
+    }
+    fn sync_physics(&mut self, _scene: &Scene, _game_object: &GameObject) -> Result<()> {
+        Ok(())
+    }
+    fn late_update(&mut self, _scene: &Scene, _game_object: &GameObject) -> Result<()> {
+        Ok(())
     }
     fn update(
         &mut self,

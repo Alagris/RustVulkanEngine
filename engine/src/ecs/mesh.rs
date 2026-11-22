@@ -32,8 +32,15 @@ impl Component for Mesh {
         self
     }
 
-    fn start(&mut self, _scene: &Scene, _game_object: &GameObject) -> bool {
-        true
+    fn try_start(
+        &mut self,
+        _scene: &Scene,
+        _game_object: &GameObject,
+    ) -> Result<crate::ecs::Features> {
+        Ok(crate::ecs::Features {
+            updatable: true,
+            ..Default::default()
+        })
     }
 
     fn update(
