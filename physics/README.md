@@ -20,11 +20,26 @@ C++ toolchain and compiles the vendored PhysX source.
 ## Current safe wrapper
 
 `physx-safe` validates primitive collider dimensions, materials, transforms,
-dynamic masses, and time steps. `PhysicsWorld` owns its scene and materials
-before its PhysX context, only returns stable body handles and copied values,
-and is deliberately neither `Send` nor `Sync`. It currently supports sphere,
-box, capsule, and plane colliders, rigid-body pose access, force application,
-and blocking simulation steps.
+dynamic masses, controller movement, and time steps. `PhysicsWorld` owns its
+scene, controllers, bodies and materials, exposes stable handles and copied
+collider descriptors instead of native pointers, and is neither `Send` nor
+`Sync`. Multiple worlds on the same thread share one PhysX foundation; creating
+a world on another thread while that foundation is live returns an error.
+
+Static and dynamic bodies support sphere, box and capsule shapes; planes are
+static only. A body can be removed with `remove_body`, and `collider` returns a
+copyable reference suitable for storing in a component. Handles are invalid
+after removal or world destruction and cannot be used with a different world.
+Capsule controllers have separate handles, position, collide-and-slide movement,
+contact flags and removal APIs. Callers must supply gravity in the requested
+displacement; controller movement does not apply gravity automatically.
+
+`Pose` contains translation and rotation only. `ColliderGeometry::scaled`
+converts local scale to primitive dimensions: box axes may scale independently,
+spheres require uniform scale, and capsules require equal radial scales.
+Zero, negative, nonfinite and unrepresentable scales are rejected. Scale
+cannot currently be changed on an existing collider; callers must recreate it.
+Mesh colliders, general scene queries and collision filtering are not yet exposed.
 
 The wrapper currently uses the CPU simulation path. Although the vendored SDK
 contains PhysX 5 GPU-related headers and data types, this `physx-rs` revision

@@ -10,7 +10,7 @@ pub enum CapsuleAxis {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum GeometryKind {
+pub enum GeometryKind {
     Sphere {
         radius: f32,
     },
@@ -29,6 +29,43 @@ pub(crate) enum GeometryKind {
 pub struct ColliderGeometry(pub(crate) GeometryKind);
 
 impl ColliderGeometry {
+    pub fn kind(self) -> GeometryKind {
+        self.0
+    }
+
+    /// Scale dimensions in collider-local axes. Spheres require uniform scale;
+    /// capsules require equal radial scale on their two perpendicular axes.
+    pub fn scaled(self, scale: Vec3) -> Result<Self, PhysicsError> {
+        if !scale.is_finite() || scale.min_element() <= 0.0 {
+            return Err(PhysicsError::InvalidScale);
+        }
+        match self.0 {
+            GeometryKind::Sphere { radius } => {
+                if scale.x != scale.y || scale.x != scale.z {
+                    return Err(PhysicsError::UnsupportedScale);
+                }
+                Self::sphere(radius * scale.x)
+            }
+            GeometryKind::Box { half_extents } => Self::cuboid(half_extents * scale),
+            GeometryKind::Capsule {
+                radius,
+                half_height,
+                axis,
+            } => {
+                let (axial, radial1, radial2) = match axis {
+                    CapsuleAxis::X => (scale.x, scale.y, scale.z),
+                    CapsuleAxis::Y => (scale.y, scale.x, scale.z),
+                    CapsuleAxis::Z => (scale.z, scale.x, scale.y),
+                };
+                if radial1 != radial2 {
+                    return Err(PhysicsError::UnsupportedScale);
+                }
+                Self::capsule(radius * radial1, half_height * axial, axis)
+            }
+            GeometryKind::Plane => Ok(self),
+        }
+    }
+
     pub fn sphere(radius: f32) -> Result<Self, PhysicsError> {
         if !radius.is_finite() || radius <= 0.0 {
             return Err(PhysicsError::InvalidSphereRadius);
@@ -131,5 +168,36 @@ impl ColliderDesc {
     pub fn with_local_pose(mut self, local_pose: Pose) -> Self {
         self.local_pose = local_pose;
         self
+    }
+
+    pub fn geometry(self) -> ColliderGeometry {
+        self.geometry
+    }
+
+    pub fn material(self) -> ColliderMaterial {
+        self.material
+    }
+
+    pub fn local_pose(self) -> Pose {
+        self.local_pose
+    }
+}
+
+/// A copyable reference to a collider owned by a particular physics world.
+///
+/// The handle becomes invalid when the body is removed or its world is dropped.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Collider {
+    pub(crate) body: crate::BodyHandle,
+    pub(crate) descriptor: ColliderDesc,
+}
+
+impl Collider {
+    pub fn body(self) -> crate::BodyHandle {
+        self.body
+    }
+
+    pub fn descriptor(self) -> ColliderDesc {
+        self.descriptor
     }
 }

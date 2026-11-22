@@ -12,14 +12,14 @@ static NEXT_BODY_ID: AtomicU64 = AtomicU64::new(1);
 pub struct BodyHandle(pub(crate) u64);
 
 pub(crate) struct BodyTag {
-    pub(crate) handle: BodyHandle,
+    _handle: BodyHandle,
     _padding: [usize; 2],
 }
 
 impl BodyTag {
     pub(crate) fn new(handle: BodyHandle) -> Self {
         Self {
-            handle,
+            _handle: handle,
             _padding: [0; 2],
         }
     }

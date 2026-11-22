@@ -18,13 +18,21 @@ pub(crate) use invariant_assert;
 
 mod body;
 mod collider;
+mod context;
+mod controller;
+mod controller_world;
 mod error;
 mod native;
 mod pose;
 mod world;
 
 pub use body::{BodyHandle, RigidBodyDesc};
-pub use collider::{CapsuleAxis, ColliderDesc, ColliderGeometry, ColliderMaterial};
+pub use collider::{
+    CapsuleAxis, Collider, ColliderDesc, ColliderGeometry, ColliderMaterial, GeometryKind,
+};
+pub use controller::{
+    CapsuleController, CapsuleControllerDesc, ControllerHandle, ControllerMoveResult,
+};
 pub use error::PhysicsError;
 pub use pose::Pose;
 pub use world::PhysicsWorld;

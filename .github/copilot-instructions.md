@@ -33,3 +33,7 @@ fn bubble_sort(arr: * mut i32) -> Result<(), &'static str> {
     Ok(())
 }
 ```
+
+Also avoid creating massive rust file. Split them. Try to keep one file per struct/trait unless it's something closely related that makes sense to keep together. Don't put anythin in mod.rs/lib.rs except the module declarations. Try to create modules and submodules to organize your code logically.
+
+Add borrow-checking and lifetime annotations where appropriate to ensure memory safety and prevent dangling references. This will help catch potential issues at compile time rather than at runtime.

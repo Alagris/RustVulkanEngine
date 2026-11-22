@@ -233,7 +233,9 @@ unsafe impl<U> UserData for PxCapsuleControllerDesc<U> {
 impl<U> Drop for PxCapsuleControllerDesc<U> {
     fn drop(&mut self) {
         unsafe {
-            UserData::drop_user_data(self);
+            if !self.obj.userData.is_null() {
+                UserData::drop_user_data(self);
+            }
             PxCapsuleControllerDesc_delete(self.as_mut_ptr());
         }
     }
@@ -390,7 +392,9 @@ unsafe impl<U> UserData for PxBoxControllerDesc<U> {
 impl<U> Drop for PxBoxControllerDesc<U> {
     fn drop(&mut self) {
         unsafe {
-            UserData::drop_user_data(self);
+            if !self.obj.userData.is_null() {
+                UserData::drop_user_data(self);
+            }
             PxBoxControllerDesc_delete(self.as_mut_ptr())
         }
     }

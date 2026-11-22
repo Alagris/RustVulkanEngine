@@ -1,8 +1,8 @@
 use glam::{Quat, Vec3};
 
 use crate::{
-    CapsuleAxis, ColliderDesc, ColliderGeometry, ColliderMaterial, PhysicsError, PhysicsWorld,
-    Pose, RigidBodyDesc,
+    CapsuleAxis, CapsuleControllerDesc, ColliderDesc, ColliderGeometry, ColliderMaterial,
+    PhysicsError, PhysicsWorld, Pose, RigidBodyDesc,
 };
 
 #[test]
@@ -85,6 +85,40 @@ fn world_creates_and_steps_a_dynamic_collider_and_releases_native_memory() {
 
     let final_height = world.pose(body).unwrap().translation().y;
     assert!(final_height < initial_height);
+    for _ in 0..10 {
+        let controller = world
+            .create_capsule_controller(
+                CapsuleControllerDesc::new(
+                    Vec3::Y * 5.0,
+                    0.5,
+                    1.0,
+                    0.1,
+                    ColliderMaterial::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        world
+            .move_controller(controller.handle(), Vec3::X, 0.0, 1.0 / 60.0)
+            .unwrap();
+        world.remove_controller(controller.handle()).unwrap();
+    }
+    // The manager must release controllers that remain alive when the world drops.
+    for x in [0.0, 3.0] {
+        world
+            .create_capsule_controller(
+                CapsuleControllerDesc::new(
+                    Vec3::new(x, 8.0, 0.0),
+                    0.5,
+                    1.0,
+                    0.1,
+                    ColliderMaterial::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    world.remove_body(body).unwrap();
     drop(world);
 
     let memory_after = physx::foundation::memory_tracking::snapshot();
