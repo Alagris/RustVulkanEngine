@@ -8,6 +8,7 @@ pub mod ecs;
 pub mod graphics;
 pub mod material;
 mod parsers;
+pub mod postprocess;
 pub mod proc_mesh;
 pub mod render_loop;
 pub mod render_pipeline;

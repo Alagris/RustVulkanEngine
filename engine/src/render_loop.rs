@@ -6,6 +6,7 @@ use crate::ecs::mesh_serde::{
 use crate::ecs::{Animator, Camera, ComponentRegistry, InstancedMesh, Mesh, ProceduralMesh, Scene};
 use crate::graphics::{GpuContext, Graphics, InstanceBuffer, Mesh as GraphicsMesh};
 use crate::material::{Material, ShaderPass};
+use crate::postprocess::PostProcessRegistry;
 use crate::proc_mesh;
 use crate::render_pipeline::RenderPipeline;
 use crate::settings::RuntimeSettings;
@@ -37,12 +38,27 @@ impl RenderLoop {
     pub fn run(
         settings: RuntimeSettings,
         options: RenderLoopOptions,
+        registry: ComponentRegistry,
+    ) -> Result<()> {
+        Self::run_with_post_process_registry(
+            settings,
+            options,
+            registry,
+            PostProcessRegistry::default(),
+        )
+    }
+
+    pub fn run_with_post_process_registry(
+        settings: RuntimeSettings,
+        options: RenderLoopOptions,
         mut registry: ComponentRegistry,
+        postprocess_registry: PostProcessRegistry,
     ) -> Result<()> {
         if options.frame_limit == Some(0) {
             return Err(anyhow!("frame limit must be greater than zero"));
         }
-        let pipeline = RenderPipeline::load(&settings.pipeline)?;
+        let pipeline =
+            RenderPipeline::load_with_registry(&settings.pipeline, &postprocess_registry)?;
         pipeline.compile_shaders()?;
         if options.compile_only {
             log::info!("Shader compilation completed.");

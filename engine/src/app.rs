@@ -3,8 +3,9 @@ use crate::graphics::{
     InstanceBufferHandle, Mesh, UniformBuffer,
 };
 use crate::material::Material;
+use crate::postprocess::PostProcessPass;
 use crate::render_pipeline::{
-    ColorFormat, DepthFormat, PostProcessPass, PresentMode, RenderPipeline, ShaderInputFormat,
+    ColorFormat, DepthFormat, PresentMode, RenderPipeline, ShaderInputFormat,
 };
 use anyhow::{Result, anyhow, bail};
 use glam::Mat4;
@@ -1216,7 +1217,7 @@ unsafe fn create_post_process_state(
     scene_view: vk::ImageView,
     swapchain_views: &[vk::ImageView],
     swapchain_images: &[vk::Image],
-    passes: &[PostProcessPass],
+    passes: &[std::sync::Arc<dyn PostProcessPass>],
     output_dir: &std::path::Path,
 ) -> Result<PostProcessState> {
     assert!(!passes.is_empty());

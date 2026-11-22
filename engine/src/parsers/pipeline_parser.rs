@@ -1,8 +1,9 @@
 use crate::parsers::hlsl_preprocessor;
 use crate::parsers::material_parser;
+use crate::postprocess::{PostProcessPass, PostProcessRegistry};
 use crate::render_pipeline::{
-    BufferSettings, ColorFormat, DepthFormat, PostProcessPass, PresentMode, RenderBufferSettings,
-    RenderPass, RenderPipeline, ShaderPassMetadata, SwapchainSettings,
+    BufferSettings, ColorFormat, DepthFormat, PresentMode, RenderBufferSettings, RenderPass,
+    RenderPipeline, ShaderPassMetadata, SwapchainSettings,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
@@ -18,23 +19,8 @@ struct PipelineFile {
     #[serde(default)]
     render_buffers: RenderBuffersFile,
     #[serde(default)]
-    postprocessing: Vec<PostProcessSettings>,
+    postprocessing: Vec<serde_yaml::Value>,
     passes: Vec<PassSettings>,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum PostProcessSettings {
-    Blur {
-        radius: Option<f32>,
-    },
-    ToneMapping {
-        exposure: Option<f32>,
-    },
-    Fxaa {
-        edge_threshold: Option<f32>,
-        min_edge_threshold: Option<f32>,
-    },
 }
 
 #[derive(Deserialize)]
@@ -125,16 +111,30 @@ struct PassSettings {
 
 impl RenderPipeline {
     pub fn load(path: &Path) -> Result<Self> {
+        Self::load_with_registry(path, &PostProcessRegistry::default())
+    }
+
+    pub fn load_with_registry(path: &Path, registry: &PostProcessRegistry) -> Result<Self> {
         let source = fs::read_to_string(path)
             .with_context(|| format!("Failed to read render pipeline {}", path.display()))?;
         let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
-        Self::from_yaml(&source, base_dir)
+        Self::from_yaml_with_registry(&source, base_dir, registry)
             .with_context(|| format!("Invalid render pipeline {}", path.display()))
     }
 
+    #[cfg(test)]
     pub(crate) fn from_yaml(source: &str, base_dir: &Path) -> Result<Self> {
+        Self::from_yaml_with_registry(source, base_dir, &PostProcessRegistry::default())
+    }
+
+    pub(crate) fn from_yaml_with_registry(
+        source: &str,
+        base_dir: &Path,
+        postprocess_registry: &PostProcessRegistry,
+    ) -> Result<Self> {
         let config: PipelineFile =
             serde_yaml::from_str(source).context("Failed to parse pipeline YAML")?;
+        postprocess_registry.registered_types()?;
         if config.pipeline.name.trim().is_empty() {
             bail!("pipeline.name must not be empty");
         }
@@ -190,49 +190,15 @@ impl RenderPipeline {
             },
             shadow_cascades: config.render_buffers.shadow.shadow_cascades,
         };
-        let mut post_processing = Vec::new();
-        for settings in config.postprocessing {
-            match settings {
-                PostProcessSettings::Blur { radius } => {
-                    let radius = radius.unwrap_or(2.0);
-                    if !radius.is_finite() || radius <= 0.0 {
-                        bail!("postprocessing blur radius must be finite and greater than zero");
-                    }
-                    post_processing.push(PostProcessPass::BlurHorizontal { radius });
-                    post_processing.push(PostProcessPass::BlurVertical { radius });
-                }
-                PostProcessSettings::ToneMapping { exposure } => {
-                    let exposure = exposure.unwrap_or(1.0);
-                    if !exposure.is_finite() || exposure <= 0.0 {
-                        bail!(
-                            "postprocessing tone_mapping exposure must be finite and greater than zero"
-                        );
-                    }
-                    post_processing.push(PostProcessPass::ToneMapping { exposure });
-                }
-                PostProcessSettings::Fxaa {
-                    edge_threshold,
-                    min_edge_threshold,
-                } => {
-                    let edge_threshold = edge_threshold.unwrap_or(0.125);
-                    let min_edge_threshold = min_edge_threshold.unwrap_or(0.0312);
-                    if !edge_threshold.is_finite() || !(0.0..=1.0).contains(&edge_threshold) {
-                        bail!(
-                            "postprocessing fxaa edge_threshold must be finite and between zero and one"
-                        );
-                    }
-                    if !min_edge_threshold.is_finite() || !(0.0..=1.0).contains(&min_edge_threshold)
-                    {
-                        bail!(
-                            "postprocessing fxaa min_edge_threshold must be finite and between zero and one"
-                        );
-                    }
-                    post_processing.push(PostProcessPass::Fxaa {
-                        edge_threshold,
-                        min_edge_threshold,
-                    });
-                }
-            }
+        let mut post_processing: Vec<std::sync::Arc<dyn PostProcessPass>> = Vec::new();
+        for (index, definition) in config.postprocessing.into_iter().enumerate() {
+            post_processing.extend(
+                postprocess_registry
+                    .create_stages(definition)
+                    .with_context(|| format!("Invalid postprocessing entry {index}"))?
+                    .into_iter()
+                    .map(std::sync::Arc::from),
+            );
         }
 
         let mut names = HashSet::new();

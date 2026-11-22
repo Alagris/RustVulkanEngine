@@ -4,8 +4,45 @@ use syn::parse::{Parse, ParseStream};
 use syn::parse_macro_input;
 use syn::punctuated::Punctuated;
 use syn::{
-    Attribute, Data, DeriveInput, Fields, Ident, ItemStruct, Meta, Path, Token, parse_quote,
+    Attribute, Data, DeriveInput, Fields, Ident, ItemStruct, LitStr, Meta, Path, Token, parse_quote,
 };
+
+#[proc_macro_attribute]
+pub fn post_process(arguments: TokenStream, input: TokenStream) -> TokenStream {
+    let type_name = parse_macro_input!(arguments as LitStr);
+    if type_name.value().trim().is_empty() {
+        return syn::Error::new_spanned(type_name, "postprocess type name must not be empty")
+            .to_compile_error()
+            .into();
+    }
+    let item = parse_macro_input!(input as ItemStruct);
+    if !item.generics.params.is_empty() {
+        return syn::Error::new_spanned(
+            item,
+            "postprocess registration does not support generic structs",
+        )
+        .to_compile_error()
+        .into();
+    }
+    let name = &item.ident;
+    quote! {
+        #item
+
+        ::engine::postprocess::inventory::submit! {
+            ::engine::postprocess::PostProcessRegistration {
+                type_name: #type_name,
+                factory: |data| {
+                    use ::engine::postprocess::PostProcessPass as _;
+                    let pass: #name =
+                        ::engine::postprocess::serde_yaml::from_value(data.clone())?;
+                    pass.validate()?;
+                    Ok(Box::new(pass).into_stages())
+                },
+            }
+        }
+    }
+    .into()
+}
 
 #[proc_macro_attribute]
 pub fn component(arguments: TokenStream, input: TokenStream) -> TokenStream {
