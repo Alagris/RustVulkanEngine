@@ -143,6 +143,159 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
     }
 }
 
+#[proc_macro_derive(DataAsset, attributes(data_asset))]
+pub fn derive_data_asset(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match expand_data_asset(input) {
+        Ok(expansion) => expansion.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+#[proc_macro_derive(Modifier)]
+pub fn derive_modifier(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match expand_modifier(input) {
+        Ok(expansion) => expansion.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+fn expand_modifier(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let name = input.ident;
+    if !matches!(input.data, Data::Struct(_)) {
+        return Err(syn::Error::new_spanned(
+            name,
+            "Modifier can only be derived for structs",
+        ));
+    }
+    if !input.generics.params.is_empty() {
+        return Err(syn::Error::new_spanned(
+            name,
+            "Modifier cannot be derived for generic types",
+        ));
+    }
+    Ok(quote! {
+        impl ::engine::data::modifier::Modifier for #name {}
+
+        ::engine::data::modifier::inventory::submit! {
+            ::engine::data::modifier::ModifierRegistration {
+                type_name: <#name as ::engine::data::data_asset::DataAssetType>::TYPE_NAME,
+                cast: |asset: &dyn ::engine::data::data_asset::DataAsset| {
+                    asset
+                        .as_any()
+                        .downcast_ref::<#name>()
+                        .map(|asset| asset as &dyn ::engine::data::modifier::Modifier)
+                },
+            }
+        }
+    })
+}
+
+fn expand_data_asset(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let name = input.ident;
+    if !matches!(input.data, Data::Struct(_)) {
+        return Err(syn::Error::new_spanned(
+            name,
+            "DataAsset can only be derived for structs",
+        ));
+    }
+    if !input.generics.params.is_empty() {
+        return Err(syn::Error::new_spanned(
+            name,
+            "DataAsset cannot be derived for generic types",
+        ));
+    }
+    let mut type_name = None;
+    let mut serialize_with = None;
+    let mut deserialize_with = None;
+    for attribute in input
+        .attrs
+        .iter()
+        .filter(|attribute| attribute.path().is_ident("data_asset"))
+    {
+        attribute.parse_nested_meta(|meta| {
+            if meta.path.is_ident("type_name") {
+                let value: LitStr = meta.value()?.parse()?;
+                if type_name.replace(value).is_some() {
+                    return Err(meta.error("data asset type_name may only be specified once"));
+                }
+            } else if meta.path.is_ident("serialize_with") {
+                let path: Path = meta.value()?.parse()?;
+                if serialize_with.replace(path).is_some() {
+                    return Err(meta.error("serialize_with may only be specified once"));
+                }
+            } else if meta.path.is_ident("deserialize_with") {
+                let path: Path = meta.value()?.parse()?;
+                if deserialize_with.replace(path).is_some() {
+                    return Err(meta.error("deserialize_with may only be specified once"));
+                }
+            } else {
+                return Err(
+                    meta.error("expected `type_name`, `serialize_with`, or `deserialize_with`")
+                );
+            }
+            Ok(())
+        })?;
+    }
+
+    let type_name = type_name
+        .map(|name| quote!(#name))
+        .unwrap_or_else(|| quote!(stringify!(#name)));
+    let factory = if let Some(deserialize_with) = deserialize_with {
+        quote! {
+            |data: &::engine::data::data_asset::serde_yaml::Value,
+             context: &::engine::data::data_asset::DataAssetDeserializeContext| {
+                let asset: #name = #deserialize_with(data, context)?;
+                Ok(Box::new(asset) as Box<dyn ::engine::data::DataAsset>)
+            }
+        }
+    } else {
+        quote! {
+            |data: &::engine::data::data_asset::serde_yaml::Value,
+             _context: &::engine::data::data_asset::DataAssetDeserializeContext| {
+                let asset: #name =
+                    ::engine::data::data_asset::serde_yaml::from_value(data.clone())?;
+                Ok(Box::new(asset) as Box<dyn ::engine::data::DataAsset>)
+            }
+        }
+    };
+    let serializer = if let Some(serialize_with) = serialize_with {
+        quote!(#serialize_with(self))
+    } else {
+        quote! {
+            ::engine::data::data_asset::serde_yaml::to_value(self)
+                .map_err(::engine::data::data_asset::anyhow_crate::Error::from)
+        }
+    };
+    Ok(quote! {
+        impl ::engine::data::data_asset::DataAsset for #name {
+            fn as_any(&self) -> &dyn ::std::any::Any {
+                self
+            }
+
+            fn serialize_data(
+                &self,
+            ) -> ::engine::data::data_asset::anyhow_crate::Result<
+                ::engine::data::data_asset::serde_yaml::Value
+            > {
+                #serializer
+            }
+        }
+
+        impl ::engine::data::data_asset::DataAssetType for #name {
+            const TYPE_NAME: &'static str = #type_name;
+        }
+
+        ::engine::data::data_asset::inventory::submit! {
+            ::engine::data::data_asset::DataAssetRegistration {
+                type_name: #type_name,
+                factory: #factory,
+            }
+        }
+    })
+}
+
 fn expand_component(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let name = input.ident;
     let Data::Struct(data) = input.data else {

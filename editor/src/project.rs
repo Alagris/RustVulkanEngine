@@ -101,6 +101,7 @@ impl Project {
         Ok(RuntimeSettings {
             pipeline,
             default_scene,
+            data_assets: Some(self.assets.root().to_path_buf()),
         })
     }
 
@@ -131,12 +132,14 @@ impl Project {
                     self.settings.runtime.default_scene.display()
                 )
             })?;
+        let data_assets = self.assets.package_data_assets(output)?;
         let runtime_settings = RuntimeSettings {
             pipeline: packaged_pipeline
                 .file_name()
                 .map(PathBuf::from)
                 .ok_or_else(|| anyhow!("packaged pipeline path has no filename"))?,
             default_scene: scene_relative,
+            data_assets: Some(data_assets),
         };
         let runtime_settings_path = output.join("runtime_settings.yaml");
         fs::write(
@@ -275,6 +278,41 @@ editor_scene: editor.scene
         assert_eq!(
             project.settings().editor_scene,
             assets.join("scenes/editor.scene").canonicalize().unwrap()
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn packages_data_assets_and_resolves_the_runtime_data_directory() {
+        let directory = temp_dir();
+        let assets = directory.join("assets");
+        fs::create_dir_all(&assets).unwrap();
+        fs::write(assets.join("pipeline.pipe"), "passes: []\n").unwrap();
+        fs::write(assets.join("game.scene"), "root:\n  name: Game\n").unwrap();
+        fs::write(assets.join("editor.scene"), "root:\n  name: Editor\n").unwrap();
+        fs::write(
+            assets.join("controls.data"),
+            "type: Input\nname: Controls\ndata:\n  keymaps: {}\n",
+        )
+        .unwrap();
+        let settings_path = directory.join("settings.yaml");
+        fs::write(
+            &settings_path,
+            "pipeline: pipeline.pipe\ndefault_scene: game.scene\neditor_scene: editor.scene\n",
+        )
+        .unwrap();
+        let output = directory.join("release");
+        let project = Project::load(&settings_path).unwrap();
+
+        let runtime_settings_path = project.package(&output).unwrap();
+        let runtime = RuntimeSettings::load(&runtime_settings_path).unwrap();
+        assert_eq!(runtime.data_assets, Some(output.join("data")));
+        assert!(output.join("data").join("controls.data").is_file());
+        assert!(
+            engine::data::DataAssetDatabase::load_dir(runtime.data_assets.unwrap())
+                .unwrap()
+                .get::<engine::data::input::Input>("Controls")
+                .is_some()
         );
         fs::remove_dir_all(directory).unwrap();
     }

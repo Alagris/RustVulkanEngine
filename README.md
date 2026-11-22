@@ -174,7 +174,48 @@ editor_scene: editor.scene
 
 In development, the editor resolves the pipeline and default scene and creates
 a `RuntimeSettings` value. Release packaging writes a stripped
-`runtime_settings.yaml` containing only `pipeline` and `default_scene`.
+`runtime_settings.yaml` containing `pipeline`, `default_scene`, and the packaged
+data asset directory.
+
+Data assets are YAML `.data` files under the project's `assets` directory. They
+are instantiated and awakened during editor scanning and runtime startup. A
+data type can use `#[derive(DataAsset)]`; registrations are collected
+automatically. The default loader and serializer expect the type to implement
+`Deserialize` and `Serialize`. For custom serde
+behavior, `#[data_asset(deserialize_with = path, serialize_with = path)]`
+provides a deserializer with signature
+`fn(&serde_yaml::Value, &DataAssetDeserializeContext) -> anyhow::Result<T>` and
+a serializer with signature
+`fn(&T) -> anyhow::Result<serde_yaml::Value>`. Derive `Modifier` alongside
+`DataAsset` to make a type usable as a modifier asset.
+
+```rust
+#[derive(engine::data::DataAsset, serde::Deserialize, serde::Serialize)]
+struct KeyMap {
+    bindings: std::collections::BTreeMap<
+        String,
+        engine::data::DataRef<engine::data::key_binding::KeyBinding>,
+    >,
+}
+```
+
+Each file declares a registered type and a name, with optional same-type parent
+inheritance:
+
+```yaml
+type: Input
+name: PlayerControls
+data:
+  keymaps:
+    Gameplay: { ref: Gameplay }
+```
+
+``DataRef<T>` values with `ref` are weak links to named assets. A directly
+embedded value is owned by its containing data asset; nested modifiers use an
+explicit `{ type, data }` mapping. Parent inheritance merges mappings
+recursively, while cross-asset references may form cycles. Built-in data types
+include `Input`, `KeyMap`, `KeyBinding`, and an animation clip configuration;
+input processing and clip playback are not yet implemented.
 
 Scene and prefab YAML share the same root object format. A scene can provide
 `deltaTime`, `timeSinceStart`, a root object, children, transforms, and typed

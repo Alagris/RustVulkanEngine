@@ -64,6 +64,11 @@ impl RenderLoop {
             log::info!("Shader compilation completed.");
             return Ok(());
         }
+        let _data_assets = match &settings.data_assets {
+            Some(path) => crate::data::DataAssetDatabase::load_dir(path)
+                .with_context(|| format!("Failed to load data assets from {}", path.display()))?,
+            None => crate::data::DataAssetDatabase::from_documents(Vec::new())?,
+        };
         let first_pass = pipeline
             .passes
             .first()
@@ -408,6 +413,7 @@ mod tests {
             RuntimeSettings {
                 pipeline: PathBuf::from("missing.pipe"),
                 default_scene: PathBuf::from("missing.scene"),
+                data_assets: None,
             },
             RenderLoopOptions {
                 frame_limit: Some(0),

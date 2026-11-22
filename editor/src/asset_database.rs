@@ -64,6 +64,7 @@ pub struct AssetDatabase {
     assets: BTreeMap<AssetRef, PathBuf>,
     processors: HashMap<AssetType, AssetProcessor>,
     prefab_cache: RwLock<HashMap<String, serde_yaml::Value>>,
+    data_assets: engine::data::DataAssetDatabase,
 }
 
 impl AssetDatabase {
@@ -77,7 +78,7 @@ impl AssetDatabase {
         if !root.is_dir() {
             bail!("asset root is not a directory: {}", root.display());
         }
-        let mut assets = BTreeMap::new();
+        let mut assets: BTreeMap<AssetRef, PathBuf> = BTreeMap::new();
         let mut pending = vec![root.clone()];
         while let Some(directory) = pending.pop() {
             for entry in fs::read_dir(&directory)
@@ -113,6 +114,21 @@ impl AssetDatabase {
                             path.display()
                         )
                     })?
+                } else if asset_type == AssetType::Data {
+                    let document = read_yaml(&path)?;
+                    let type_name = document
+                        .get("type")
+                        .and_then(serde_yaml::Value::as_str)
+                        .filter(|name| !name.trim().is_empty())
+                        .ok_or_else(|| {
+                            anyhow!("data asset has no valid type in {}", path.display())
+                        })?;
+                    let asset_name = document
+                        .get("name")
+                        .and_then(serde_yaml::Value::as_str)
+                        .filter(|name| !name.trim().is_empty())
+                        .unwrap_or(&file_name);
+                    format!("{type_name}/{asset_name}")
                 } else {
                     file_name
                 };
@@ -120,7 +136,16 @@ impl AssetDatabase {
                 let canonical = path
                     .canonicalize()
                     .with_context(|| format!("Failed to resolve asset {}", path.display()))?;
-                if let Some(previous) = assets.insert(key.clone(), canonical) {
+                if let Some(previous) = assets.get(&key) {
+                    if asset_type == AssetType::Data {
+                        log::warn!(
+                            "Ignoring duplicate data asset '{}': {} and {}",
+                            key.name,
+                            previous.display(),
+                            path.display()
+                        );
+                        continue;
+                    }
                     bail!(
                         "duplicate {:?} asset name '{}': {} and {}",
                         key.asset_type,
@@ -129,13 +154,17 @@ impl AssetDatabase {
                         path.display()
                     );
                 }
+                assets.insert(key, canonical);
             }
         }
+        let data_assets = engine::data::DataAssetDatabase::load_dir(&root)
+            .with_context(|| format!("Failed to load data assets from {}", root.display()))?;
         let database = Self {
             root,
             assets,
             processors: HashMap::new(),
             prefab_cache: RwLock::new(HashMap::new()),
+            data_assets,
         };
         let yaml_assets = database
             .assets
@@ -170,6 +199,10 @@ impl AssetDatabase {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub fn data_assets(&self) -> &engine::data::DataAssetDatabase {
+        &self.data_assets
     }
 
     pub fn assets(&self) -> impl Iterator<Item = (&AssetRef, &PathBuf)> {
@@ -247,6 +280,33 @@ impl AssetDatabase {
             format!("Failed to write expanded scene {}", scene_output.display())
         })?;
         Ok(scene_output)
+    }
+
+    pub fn package_data_assets(&self, output: &Path) -> Result<PathBuf> {
+        let data_output = output.join("data");
+        fs::create_dir_all(&data_output)?;
+        for source in self
+            .assets
+            .iter()
+            .filter(|(reference, _)| reference.asset_type == AssetType::Data)
+            .map(|(_, source)| source)
+        {
+            let relative = source
+                .strip_prefix(&self.root)
+                .with_context(|| format!("data asset is outside {}", self.root.display()))?;
+            let destination = data_output.join(relative);
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(source, &destination).with_context(|| {
+                format!(
+                    "Failed to package data asset {} to {}",
+                    source.display(),
+                    destination.display()
+                )
+            })?;
+        }
+        Ok(PathBuf::from("data"))
     }
 
     pub fn register_processor(
@@ -793,6 +853,48 @@ passes:
     }
 
     #[test]
+    fn scans_and_instantiates_typed_data_assets_and_ignores_duplicate_names() {
+        let root = temp_dir("data-assets");
+        fs::write(
+            root.join("first.data"),
+            "type: Input\nname: Shared\ndata:\n  keymaps: {}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("duplicate.data"),
+            "type: Input\nname: Shared\ndata:\n  keymaps: {}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("same-name-other-type.data"),
+            "type: AnimationClip\nname: Shared\ndata:\n  triggers: []\n",
+        )
+        .unwrap();
+
+        let database = AssetDatabase::scan(&root).unwrap();
+        assert!(
+            database
+                .data_assets()
+                .get::<engine::data::input::Input>("Shared")
+                .is_some()
+        );
+        assert!(
+            database
+                .data_assets()
+                .get::<engine::data::animation_clip::AnimationClip>("Shared")
+                .is_some()
+        );
+        assert_eq!(
+            database
+                .assets()
+                .filter(|(reference, _)| reference.asset_type == AssetType::Data)
+                .count(),
+            2
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn rejects_duplicate_names_within_an_asset_type() {
         let root = temp_dir("duplicate");
         fs::create_dir_all(root.join("first")).unwrap();
@@ -896,6 +998,32 @@ passes:
         assert!(packaged_shader.contains("struct VertexInput"));
         assert!(!packaged_shader.contains("#include"));
         assert!(!output.join("shaders").join("UnusedShader.shader").exists());
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(output).unwrap();
+    }
+
+    #[test]
+    fn package_data_assets_preserves_their_relative_paths() {
+        let root = temp_dir("package-data-assets");
+        let output = temp_dir("package-data-output");
+        fs::create_dir_all(root.join("nested")).unwrap();
+        fs::write(
+            root.join("nested").join("input.data"),
+            "type: Input\nname: Controls\ndata:\n  keymaps: {}\n",
+        )
+        .unwrap();
+        let database = AssetDatabase::scan(&root).unwrap();
+        assert_eq!(
+            database.package_data_assets(&output).unwrap(),
+            PathBuf::from("data")
+        );
+        assert!(
+            output
+                .join("data")
+                .join("nested")
+                .join("input.data")
+                .is_file()
+        );
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(output).unwrap();
     }

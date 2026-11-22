@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 pub struct RuntimeSettings {
     pub pipeline: PathBuf,
     pub default_scene: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_assets: Option<PathBuf>,
 }
 
 impl RuntimeSettings {
@@ -22,6 +24,14 @@ impl RuntimeSettings {
             }
             if !asset_path.is_absolute() {
                 *asset_path = base.join(&*asset_path);
+            }
+        }
+        if let Some(data_assets) = &mut settings.data_assets {
+            if data_assets.as_os_str().is_empty() {
+                bail!("runtime data asset path must not be empty");
+            }
+            if !data_assets.is_absolute() {
+                *data_assets = base.join(&*data_assets);
             }
         }
         Ok(settings)

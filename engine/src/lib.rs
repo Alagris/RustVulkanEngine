@@ -4,6 +4,7 @@ extern crate self as engine;
 
 pub mod anim;
 pub mod app;
+pub mod data;
 pub mod ecs;
 pub mod graphics;
 pub mod material;
