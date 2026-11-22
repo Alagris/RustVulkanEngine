@@ -152,7 +152,7 @@ pub fn derive_data_asset(input: TokenStream) -> TokenStream {
     }
 }
 
-#[proc_macro_derive(Modifier)]
+#[proc_macro_derive(Modifier, attributes(modifier))]
 pub fn derive_modifier(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match expand_modifier(input) {
@@ -175,17 +175,79 @@ fn expand_modifier(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
             "Modifier cannot be derived for generic types",
         ));
     }
+    let mut compile_with = None;
+    let mut input_type = None;
+    let mut output_type = None;
+    for attribute in input
+        .attrs
+        .iter()
+        .filter(|attribute| attribute.path().is_ident("modifier"))
+    {
+        attribute.parse_nested_meta(|meta| {
+            if meta.path.is_ident("compile_with")
+                || meta.path.is_ident("input_type")
+                || meta.path.is_ident("output_type")
+            {
+                let path: Path = meta.value()?.parse()?;
+                let slot = if meta.path.is_ident("compile_with") {
+                    &mut compile_with
+                } else if meta.path.is_ident("input_type") {
+                    &mut input_type
+                } else {
+                    &mut output_type
+                };
+                if slot.replace(path).is_some() {
+                    return Err(meta.error("modifier attribute fields may only be specified once"));
+                }
+                Ok(())
+            } else {
+                Err(meta.error("expected `compile_with`, `input_type`, or `output_type`"))
+            }
+        })?;
+    }
+    let compile_with = compile_with.ok_or_else(|| {
+        syn::Error::new_spanned(
+            &name,
+            "Modifier requires `#[modifier(compile_with = path, input_type = ..., output_type = ...)]`",
+        )
+    })?;
+    let input_type = input_type
+        .ok_or_else(|| syn::Error::new_spanned(&name, "Modifier requires a static `input_type`"))?;
+    let output_type = output_type.ok_or_else(|| {
+        syn::Error::new_spanned(&name, "Modifier requires a static `output_type`")
+    })?;
     Ok(quote! {
-        impl ::engine::data::modifier::Modifier for #name {}
+        impl #name {
+            pub const MODIFIER_INPUT_TYPE: ::engine::input::InputType = #input_type;
+            pub const MODIFIER_OUTPUT_TYPE: ::engine::input::InputType = #output_type;
+        }
 
-        ::engine::data::modifier::inventory::submit! {
-            ::engine::data::modifier::ModifierRegistration {
+        impl ::engine::input::modifier::Modifier for #name {
+            fn input_type(&self) -> ::engine::input::InputType {
+                Self::MODIFIER_INPUT_TYPE
+            }
+
+            fn output_type(&self) -> ::engine::input::InputType {
+                Self::MODIFIER_OUTPUT_TYPE
+            }
+
+            fn create_instance(
+                &self,
+            ) -> ::engine::input::modifier::anyhow_crate::Result<
+                Box<dyn ::engine::input::modifier::InputModifier>
+            > {
+                #compile_with(self)
+            }
+        }
+
+        ::engine::input::modifier::inventory::submit! {
+            ::engine::input::modifier::ModifierRegistration {
                 type_name: <#name as ::engine::data::data_asset::DataAssetType>::TYPE_NAME,
                 cast: |asset: &dyn ::engine::data::data_asset::DataAsset| {
                     asset
                         .as_any()
                         .downcast_ref::<#name>()
-                        .map(|asset| asset as &dyn ::engine::data::modifier::Modifier)
+                        .map(|asset| asset as &dyn ::engine::input::modifier::Modifier)
                 },
             }
         }

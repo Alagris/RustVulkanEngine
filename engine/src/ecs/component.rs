@@ -15,6 +15,7 @@ pub struct ComponentInstance {
     pub(crate) awoken: bool,
     pub(crate) started: bool,
     pub(crate) updates: bool,
+    component: Option<Weak<RefCell<dyn Component>>>,
 }
 
 pub trait ComponentMetadata {
@@ -58,7 +59,16 @@ impl Default for ComponentInstance {
             awoken: false,
             started: false,
             updates: false,
+            component: None,
         }
+    }
+}
+
+impl ComponentInstance {
+    pub fn weak_component<T: Component + 'static>(&self) -> Option<ComponentWeak<T>> {
+        self.component
+            .as_ref()
+            .map(|component| ComponentWeak::new(component.clone()))
     }
 }
 
@@ -93,6 +103,10 @@ impl<T: Component + 'static> ComponentWeak<T> {
         self.component.upgrade().is_some()
     }
 
+    pub(crate) fn downgrade(&self) -> Weak<RefCell<dyn Component>> {
+        self.component.clone()
+    }
+
     pub fn with<R>(&self, action: impl FnOnce(&T) -> R) -> Option<R> {
         let component = self.component.upgrade()?;
         let borrowed = component.borrow();
@@ -123,6 +137,7 @@ impl<T: Component + 'static> Clone for ComponentWeak<T> {
 
 pub(crate) fn component_ref(component: Box<dyn Component>) -> UniqueRc<dyn Component> {
     let component: UniqueRc<dyn Component> = Rc::new(RefCell::new(ComponentSlot(component)));
+    component.borrow_mut().component = Some(Rc::downgrade(&component));
     component
 }
 

@@ -32,7 +32,6 @@ static NEXT_GAME_OBJECT_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct GameObject {
     id: u64,
-    self_weak: Weak<RefCell<GameObject>>,
     pub name: String,
     transform: Cell<Transform>,
     world_transform: Cell<Transform>,
@@ -50,17 +49,14 @@ impl GameObject {
             !name.trim().is_empty(),
             "game object names must not be empty"
         );
-        Rc::new_cyclic(|self_weak| {
-            RefCell::new(Self {
-                id: NEXT_GAME_OBJECT_ID.fetch_add(1, Ordering::Relaxed),
-                self_weak: self_weak.clone(),
-                name,
-                transform: Cell::new(transform),
-                world_transform: Cell::new(transform),
-                children,
-                components: Vec::new(),
-            })
-        })
+        Rc::new(RefCell::new(Self {
+            id: NEXT_GAME_OBJECT_ID.fetch_add(1, Ordering::Relaxed),
+            name,
+            transform: Cell::new(transform),
+            world_transform: Cell::new(transform),
+            children,
+            components: Vec::new(),
+        }))
     }
 
     pub fn empty(name: impl Into<String>) -> Unique<GameObject> {
@@ -71,10 +67,10 @@ impl GameObject {
         self.id
     }
 
-    pub fn weak_reference(&self) -> GameObjectWeak {
+    pub fn weak_reference(object: &Unique<GameObject>) -> GameObjectWeak {
         GameObjectWeak {
-            id: self.id,
-            object: self.self_weak.clone(),
+            id: object.borrow().id,
+            object: Rc::downgrade(object),
         }
     }
 
@@ -201,17 +197,24 @@ impl GameObject {
         }
     }
 
-    pub(crate) fn find_by_id(&self, id: u64) -> Option<Unique<GameObject>> {
-        let this = self.self_weak.upgrade()?;
-        if self.id == id {
-            return Some(this);
+    pub(crate) fn find_by_id(root: &Unique<GameObject>, id: u64) -> Option<Unique<GameObject>> {
+        let object = root.borrow();
+        if object.id == id {
+            return Some(Rc::clone(root));
         }
-        self.children
+        object
+            .children
             .iter()
-            .find_map(|child| child.borrow().find_by_id(id))
+            .find_map(|child| Self::find_by_id(child, id))
     }
 
-    pub(crate) fn find_by_id_mut(&self, id: u64) -> Option<Unique<GameObject>> {
-        self.find_by_id(id)
+    pub(crate) fn contains(root: &Unique<GameObject>, target: &Unique<GameObject>) -> bool {
+        if Rc::ptr_eq(root, target) {
+            return true;
+        }
+        root.borrow()
+            .children
+            .iter()
+            .any(|child| Self::contains(child, target))
     }
 }

@@ -102,6 +102,8 @@ impl Project {
             pipeline,
             default_scene,
             data_assets: Some(self.assets.root().to_path_buf()),
+            input_asset: self.settings.runtime.input_asset.clone(),
+            active_input_map: self.settings.runtime.active_input_map.clone(),
         })
     }
 
@@ -140,6 +142,8 @@ impl Project {
                 .ok_or_else(|| anyhow!("packaged pipeline path has no filename"))?,
             default_scene: scene_relative,
             data_assets: Some(data_assets),
+            input_asset: self.settings.runtime.input_asset.clone(),
+            active_input_map: self.settings.runtime.active_input_map.clone(),
         };
         let runtime_settings_path = output.join("runtime_settings.yaml");
         fs::write(
@@ -311,7 +315,7 @@ editor_scene: editor.scene
         assert!(
             engine::data::DataAssetDatabase::load_dir(runtime.data_assets.unwrap())
                 .unwrap()
-                .get::<engine::data::input::Input>("Controls")
+                .get::<engine::input::Input>("Controls")
                 .is_some()
         );
         fs::remove_dir_all(directory).unwrap();

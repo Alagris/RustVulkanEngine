@@ -1,9 +1,10 @@
 use crate::ecs::Component;
 use crate::ecs::component::{ComponentRegistry, Unique, component_ref};
-use crate::ecs::game_object::GameObject;
+use crate::ecs::game_object::{GameObject, GameObjectWeak};
 use crate::ecs::game_object_serde::GameObjectDefinition;
 use crate::ecs::scene_serde::SceneDefinition;
 use crate::graphics::Graphics;
+use crate::input::{InputCallback, InputSystem, RawInput};
 use anyhow::{Context, Result, anyhow, bail};
 use cgmath::{Matrix4, SquareMatrix};
 use std::any::TypeId;
@@ -22,7 +23,7 @@ enum PendingMutation {
         type_id: TypeId,
     },
     Mutate {
-        owner_id: u64,
+        target: GameObjectWeak,
         mutation: Box<dyn FnOnce(&mut GameObject)>,
     },
 }
@@ -35,6 +36,7 @@ pub struct Scene {
     initialized: Cell<bool>,
     destroyed: Cell<bool>,
     pending_mutations: RefCell<Vec<PendingMutation>>,
+    input_system: RefCell<InputSystem>,
 }
 
 impl Scene {
@@ -66,6 +68,7 @@ impl Scene {
             initialized: Cell::new(false),
             destroyed: Cell::new(false),
             pending_mutations: RefCell::new(Vec::new()),
+            input_system: RefCell::new(InputSystem::default()),
         })
     }
 
@@ -117,6 +120,9 @@ impl Scene {
         self.root
             .borrow()
             .update_world_transforms(Matrix4::identity());
+        let input_notifications = self.input_system.borrow_mut().update(delta_time)?;
+        // The RefMut ends at the previous statement, so callbacks may re-enter input APIs.
+        InputSystem::dispatch(self, input_notifications)?;
         let mut write_index = 0;
         let mut update_error = None;
         for read_index in 0..self.components.len() {
@@ -155,19 +161,22 @@ impl Scene {
 
     pub fn defer_game_object_mutation(
         &self,
-        object_id: u64,
+        target: &GameObjectWeak,
         mutation: impl FnOnce(&mut GameObject) + 'static,
     ) -> Result<()> {
         if self.destroyed.get() {
             bail!("cannot mutate a destroyed scene");
         }
-        if self.root.borrow().find_by_id(object_id).is_none() {
-            bail!("game object {object_id} does not belong to this scene");
+        let object = target
+            .upgrade()
+            .ok_or_else(|| anyhow!("game object {} no longer exists", target.id()))?;
+        if !GameObject::contains(&self.root, &object) {
+            bail!("game object {} does not belong to this scene", target.id());
         }
         self.pending_mutations
             .borrow_mut()
             .push(PendingMutation::Mutate {
-                owner_id: object_id,
+                target: target.clone(),
                 mutation: Box::new(mutation),
             });
         Ok(())
@@ -181,7 +190,7 @@ impl Scene {
         if self.destroyed.get() {
             bail!("cannot add a component to a destroyed scene");
         }
-        if self.root.borrow().find_by_id(owner.id()).is_none() {
+        if GameObject::find_by_id(&self.root, owner.id()).is_none() {
             bail!("game object {} does not belong to this scene", owner.id());
         }
         self.pending_mutations
@@ -197,7 +206,7 @@ impl Scene {
         if self.destroyed.get() {
             bail!("cannot remove a component from a destroyed scene");
         }
-        if self.root.borrow().find_by_id(owner.id()).is_none() {
+        if GameObject::find_by_id(&self.root, owner.id()).is_none() {
             bail!("game object {} does not belong to this scene", owner.id());
         }
         if !owner
@@ -236,11 +245,16 @@ impl Scene {
                     PendingMutation::Remove { owner_id, type_id } => {
                         self.remove_component_now(owner_id, type_id)?;
                     }
-                    PendingMutation::Mutate { owner_id, mutation } => {
-                        let object =
-                            self.root.borrow().find_by_id_mut(owner_id).ok_or_else(|| {
-                                anyhow!("deferred mutation target {owner_id} no longer exists")
-                            })?;
+                    PendingMutation::Mutate { target, mutation } => {
+                        let object = target.upgrade().ok_or_else(|| {
+                            anyhow!("deferred mutation target {} no longer exists", target.id())
+                        })?;
+                        if !GameObject::contains(&self.root, &object) {
+                            bail!(
+                                "deferred mutation target {} no longer belongs to this scene",
+                                target.id()
+                            );
+                        }
                         mutation(&mut object.borrow_mut());
                     }
                 }
@@ -254,10 +268,7 @@ impl Scene {
         owner_id: u64,
         component: Box<dyn crate::ecs::Component>,
     ) -> Result<()> {
-        let owner = self
-            .root
-            .borrow()
-            .find_by_id_mut(owner_id)
+        let owner = GameObject::find_by_id(&self.root, owner_id)
             .ok_or_else(|| anyhow!("component owner {owner_id} no longer exists"))?;
         let mut component = component;
         component.owner_id = owner_id;
@@ -269,10 +280,7 @@ impl Scene {
     }
 
     fn remove_component_now(&mut self, owner_id: u64, type_id: TypeId) -> Result<()> {
-        let owner = self
-            .root
-            .borrow()
-            .find_by_id(owner_id)
+        let owner = GameObject::find_by_id(&self.root, owner_id)
             .ok_or_else(|| anyhow!("component owner {owner_id} no longer exists"))?;
         let component_index = owner
             .borrow()
@@ -359,18 +367,15 @@ impl Scene {
     }
 
     pub fn find_game_object(&self, id: u64) -> Option<Unique<GameObject>> {
-        self.root.borrow().find_by_id(id)
+        GameObject::find_by_id(&self.root, id)
     }
 
     pub fn resolve_game_object(
         &self,
         object: &crate::ecs::GameObjectWeak,
     ) -> Option<Unique<GameObject>> {
-        if object.is_alive() {
-            self.find_game_object(object.id())
-        } else {
-            None
-        }
+        let object = object.upgrade()?;
+        GameObject::contains(&self.root, &object).then_some(object)
     }
 
     pub fn find_component<T: crate::ecs::Component + 'static>(
@@ -384,6 +389,71 @@ impl Scene {
                 .is::<T>()
                 .then(|| crate::ecs::ComponentWeak::new(Rc::downgrade(&component)))
         })
+    }
+
+    pub fn configure_input(&mut self, input_system: InputSystem) -> Result<()> {
+        if self.initialized.get() {
+            bail!("input must be configured before scene initialization");
+        }
+        *self.input_system.get_mut() = input_system;
+        Ok(())
+    }
+
+    pub fn active_input_map(&self) -> Option<String> {
+        self.input_system.borrow().active_map().map(str::to_owned)
+    }
+
+    pub fn set_active_input_map(&self, name: &str) -> Result<()> {
+        let notifications = self.input_system.borrow_mut().set_active_map(name)?;
+        // Drop the RefMut before callbacks can change the active map or subscriptions.
+        InputSystem::dispatch(self, notifications)?;
+        Ok(())
+    }
+
+    pub fn subscribe_input<T: Component + 'static>(
+        &self,
+        map: &str,
+        binding: &str,
+        component: &T,
+        callback: InputCallback<T>,
+    ) -> Result<()> {
+        let component = component
+            .weak_component::<T>()
+            .ok_or_else(|| anyhow!("input subscription component is not scene-managed"))?;
+        self.input_system
+            .borrow_mut()
+            .subscribe(map, binding, &component, callback)
+    }
+
+    pub fn unsubscribe_input<T: Component + 'static>(&self, component: &T) -> Result<usize> {
+        let component = component
+            .weak_component::<T>()
+            .ok_or_else(|| anyhow!("input subscription component is not scene-managed"))?;
+        Ok(self
+            .input_system
+            .borrow_mut()
+            .unsubscribe_component(&component))
+    }
+
+    pub fn unsubscribe_input_callback<T: Component + 'static>(
+        &self,
+        component: &T,
+        callback: InputCallback<T>,
+    ) -> Result<usize> {
+        let component = component
+            .weak_component::<T>()
+            .ok_or_else(|| anyhow!("input subscription component is not scene-managed"))?;
+        Ok(self
+            .input_system
+            .borrow_mut()
+            .unsubscribe_callback(&component, callback))
+    }
+
+    pub fn consume_input(&self, input: RawInput) -> Result<()> {
+        let notifications = self.input_system.borrow_mut().consume(input)?;
+        // Callbacks may re-enter Scene input APIs, so dispatch after the RefMut is dropped.
+        InputSystem::dispatch(self, notifications)?;
+        Ok(())
     }
 }
 
@@ -719,16 +789,23 @@ root:
         )
         .unwrap();
         scene.initialize().unwrap();
-        let target_id = scene.root.borrow().children()[0].borrow().id();
+        let target = GameObject::weak_reference(&scene.root.borrow().children()[0]);
+        let outside = GameObject::empty("Outside");
+        let outside_weak = GameObject::weak_reference(&outside);
+        assert!(
+            scene
+                .defer_game_object_mutation(&outside_weak, |_| {})
+                .is_err()
+        );
         scene
-            .defer_game_object_mutation(target_id, |target| {
+            .defer_game_object_mutation(&target, |target| {
                 target
                     .set_transform(Matrix4::from_translation(Vector3::new(1.0, 0.0, 0.0)))
                     .unwrap();
             })
             .unwrap();
         scene.update(0.016, &mut Graphics::default()).unwrap();
-        let target = scene.find_game_object(target_id).unwrap();
+        let target = target.upgrade().unwrap();
         assert_eq!(target.borrow().transform().w.x, 1.0);
     }
 
@@ -741,14 +818,14 @@ root:
         )
         .unwrap();
         scene.initialize().unwrap();
-        let child = scene.root.borrow().children()[0].borrow().weak_reference();
+        let child = GameObject::weak_reference(&scene.root.borrow().children()[0]);
         let child_id = child.id();
-        let root_id = scene.root.borrow().id();
+        let root = GameObject::weak_reference(&scene.root);
         assert!(scene.resolve_game_object(&child).is_some());
         assert_eq!(scene.game_object_count(), 2);
 
         scene
-            .defer_game_object_mutation(root_id, move |root| {
+            .defer_game_object_mutation(&root, move |root| {
                 assert!(root.remove_child(child_id));
             })
             .unwrap();

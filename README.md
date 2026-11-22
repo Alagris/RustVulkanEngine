@@ -170,12 +170,14 @@ top level, while `editor_scene` is development-only:
 pipeline: pipeline.pipe
 default_scene: game.scene
 editor_scene: editor.scene
+input_asset: PlayerControls
+active_input_map: Gameplay
 ```
 
 In development, the editor resolves the pipeline and default scene and creates
 a `RuntimeSettings` value. Release packaging writes a stripped
-`runtime_settings.yaml` containing `pipeline`, `default_scene`, and the packaged
-data asset directory.
+`runtime_settings.yaml` containing `pipeline`, `default_scene`, the packaged
+data asset directory, and any configured input asset/map.
 
 Data assets are YAML `.data` files under the project's `assets` directory. They
 are instantiated and awakened during editor scanning and runtime startup. A
@@ -187,35 +189,66 @@ provides a deserializer with signature
 `fn(&serde_yaml::Value, &DataAssetDeserializeContext) -> anyhow::Result<T>` and
 a serializer with signature
 `fn(&T) -> anyhow::Result<serde_yaml::Value>`. Derive `Modifier` alongside
-`DataAsset` to make a type usable as a modifier asset.
+`DataAsset` to make a type usable as a modifier asset, and declare its
+`input_type`, `output_type`, and runtime compiler in `#[modifier(...)]`.
 
 ```rust
 #[derive(engine::data::DataAsset, serde::Deserialize, serde::Serialize)]
 struct KeyMap {
     bindings: std::collections::BTreeMap<
         String,
-        engine::data::DataRef<engine::data::key_binding::KeyBinding>,
+        engine::data::DataRef<engine::input::KeyBinding>,
     >,
 }
 ```
 
-Each file declares a registered type and a name, with optional same-type parent
-inheritance:
+Input assets select an input map and name the active map in runtime settings.
+For example:
 
 ```yaml
 type: Input
 name: PlayerControls
 data:
   keymaps:
-    Gameplay: { ref: Gameplay }
+    Gameplay:
+      type: KeyMap
+      data:
+        bindings:
+          jump:
+            type: KeyBinding
+            data:
+              key: 62
+              input_type: Bool
+              modifiers:
+                - type: Tap
+                  data: {}
 ```
 
-``DataRef<T>` values with `ref` are weak links to named assets. A directly
-embedded value is owned by its containing data asset; nested modifiers use an
-explicit `{ type, data }` mapping. Parent inheritance merges mappings
-recursively, while cross-asset references may form cycles. Built-in data types
-include `Input`, `KeyMap`, `KeyBinding`, and an animation clip configuration;
-input processing and clip playback are not yet implemented.
+`DataRef<T>` values with `ref` are weak links to named assets. Inline
+`{ type, data }` values are owned by their containing data asset. Input
+bindings are compiled into source-to-binding lookup tables when the runtime
+creates its input system. `Scene::set_active_input_map` changes maps, and
+components can subscribe with `Scene::subscribe_input(map, binding, component,
+callback)`. The callback is a typed `InputCallback<T>` function pointer that
+receives the component, map name, numeric key code, `InputState`, and value.
+Non-capturing closures can be used as callbacks. Subscriptions hold weak
+component references and expired components are removed automatically.
+`Scene::unsubscribe_input(component)` removes all callbacks for that component;
+`Scene::unsubscribe_input_callback(component, callback)` removes that callback.
+Keyboard buttons emit `Started` on press, `Ongoing` each frame while held, and
+`Ended` on release. Modifiers can emit `Triggered` or `Canceled`; cancellation
+ends the active input without a later `Ended`. Mouse buttons, movement, and
+scroll emit `Ongoing` only, including when a modifier attempts a lifecycle state.
+
+The built-in modifiers are `Swizzle` (swap Vector2 axes), `SwizzleX` (convert a
+float to `(x, 0)`), `Tap`, `DoubleTap` (`max_interval` in seconds), and `Hold`
+(`duration` in seconds). Modifiers declare fixed input and output types in
+their `#[modifier(...)]` metadata; invalid chains are rejected while assets
+are deserialized. Keyboard sources are numeric Winit `KeyCode` discriminants
+(for example, `Space` is `62` in the current Winit version). Synthetic inputs
+use the constants in `engine::input::codes`: `MOUSE_LEFT`, `MOUSE_RIGHT`,
+`MOUSE_MIDDLE`, `MOUSE_BACK`, `MOUSE_FORWARD`, `MOUSE_MOVE`, and `SCROLL`.
+Wheel values are `-1` or `1`.
 
 Scene and prefab YAML share the same root object format. A scene can provide
 `deltaTime`, `timeSinceStart`, a root object, children, transforms, and typed

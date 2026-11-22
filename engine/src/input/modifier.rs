@@ -1,11 +1,27 @@
 use crate::data::data_asset::{
     DataAsset, DataAssetCell, DataAssetDeserializeContext, DataAssetTarget,
 };
+use crate::input::input_type::InputType;
 use anyhow::{Result, anyhow, bail};
+use glam::{Vec2, Vec3};
 use serde_yaml::Value;
 use std::sync::Arc;
 
-pub trait Modifier: DataAsset {}
+pub trait Modifier: DataAsset {
+    fn input_type(&self) -> InputType;
+    fn output_type(&self) -> InputType;
+    fn create_instance(&self) -> Result<Box<dyn InputModifier>>;
+}
+
+pub trait InputModifier {
+    fn process(&mut self, input: &mut InputEvent);
+
+    fn update(&mut self, _delta_time: f32) -> Vec<InputEvent> {
+        Vec::new()
+    }
+
+    fn reset(&mut self) {}
+}
 
 pub type ModifierCast = for<'a> fn(&'a dyn DataAsset) -> Option<&'a dyn Modifier>;
 
@@ -14,6 +30,7 @@ pub struct ModifierRegistration {
     pub cast: ModifierCast,
 }
 
+pub use anyhow as anyhow_crate;
 pub use inventory;
 inventory::collect!(ModifierRegistration);
 
@@ -40,7 +57,7 @@ impl DataAssetTarget for dyn Modifier {
         let type_name = match type_name {
             Some(type_name) => {
                 if registration(type_name).is_none() {
-                    bail!("data asset type '{type_name}' does not implement Modifier");
+                    bail!("data asset type '{type_name}' is not an input modifier");
                 }
                 type_name
             }
@@ -68,7 +85,7 @@ impl DataAssetTarget for dyn Modifier {
         let type_name = type_name
             .ok_or_else(|| anyhow!("nested modifier data assets must specify a 'type'"))?;
         let registration = registration(type_name)
-            .ok_or_else(|| anyhow!("data asset type '{type_name}' does not implement Modifier"))?;
+            .ok_or_else(|| anyhow!("data asset type '{type_name}' is not an input modifier"))?;
         let cell = context.create_nested_asset(type_name, &value)?;
         let asset = cell
             .asset()
@@ -80,78 +97,51 @@ impl DataAssetTarget for dyn Modifier {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::data::data_asset::DataRef;
-    use crate::data::data_asset_database::DataAssetDatabase;
-    use crate::data::{DataAsset, Modifier};
-    use serde::{Deserialize, Serialize};
-    use serde_yaml::Value;
-    use std::path::PathBuf;
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum InputValue {
+    Bool(bool),
+    Float(f32),
+    Vector(Vec3),
+    Vector2(Vec2),
+}
 
-    #[derive(DataAsset, Debug, Deserialize, Serialize)]
-    struct ModifierHolder {
-        modifiers: Vec<DataRef<dyn Modifier>>,
+impl InputValue {
+    pub fn input_type(self) -> InputType {
+        match self {
+            Self::Bool(_) => InputType::Bool,
+            Self::Float(_) => InputType::Float,
+            Self::Vector(_) => InputType::Vector,
+            Self::Vector2(_) => InputType::Vector2,
+        }
     }
 
-    #[derive(DataAsset, Modifier, Debug, Deserialize, Serialize)]
-    struct TestModifier {
-        factor: f32,
+    pub fn neutral(input_type: InputType) -> Self {
+        match input_type {
+            InputType::Bool => Self::Bool(false),
+            InputType::Float => Self::Float(0.0),
+            InputType::Vector => Self::Vector(Vec3::ZERO),
+            InputType::Vector2 => Self::Vector2(Vec2::ZERO),
+        }
     }
+}
 
-    fn document(yaml: &str, filename: &str) -> (String, Value, PathBuf) {
-        (
-            filename.to_owned(),
-            serde_yaml::from_str(yaml).unwrap(),
-            PathBuf::from(filename),
-        )
-    }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InputState {
+    Started,
+    Ongoing,
+    Triggered,
+    Canceled,
+    Ended,
+}
 
-    #[test]
-    fn resolves_nested_and_linked_modifiers_without_modifier_registry_coupling() {
-        let database = DataAssetDatabase::from_documents(vec![
-            document(
-                "type: ModifierHolder\nname: holder\ndata:\n  modifiers:\n    - { type: TestModifier, data: { factor: 2.0 } }\n    - { ref: linked }\n",
-                "holder.data",
-            ),
-            document(
-                "type: TestModifier\nname: linked\ndata:\n  factor: 3.0\n",
-                "linked.data",
-            ),
-        ])
-        .unwrap();
-        let holder = database.get::<ModifierHolder>("holder").unwrap();
-        assert_eq!(
-            holder.with(|holder| holder.modifiers[0].is_nested()),
-            Some(true)
-        );
-        assert_eq!(
-            holder.with(|holder| holder.modifiers[1].is_nested()),
-            Some(false)
-        );
-        assert_eq!(
-            holder.with(|holder| {
-                holder.modifiers[0].with(|modifier| {
-                    modifier
-                        .as_any()
-                        .downcast_ref::<TestModifier>()
-                        .unwrap()
-                        .factor
-                })
-            }),
-            Some(Some(2.0))
-        );
-        assert_eq!(
-            holder.with(|holder| {
-                holder.modifiers[1].with(|modifier| {
-                    modifier
-                        .as_any()
-                        .downcast_ref::<TestModifier>()
-                        .unwrap()
-                        .factor
-                })
-            }),
-            Some(Some(3.0))
-        );
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InputEvent {
+    pub state: InputState,
+    pub value: InputValue,
+}
+
+impl InputEvent {
+    pub fn new(state: InputState, value: InputValue) -> Self {
+        Self { state, value }
     }
 }

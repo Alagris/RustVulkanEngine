@@ -9,6 +9,10 @@ pub struct RuntimeSettings {
     pub default_scene: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_assets: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_asset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_input_map: Option<String>,
 }
 
 impl RuntimeSettings {
@@ -33,6 +37,20 @@ impl RuntimeSettings {
             if !data_assets.is_absolute() {
                 *data_assets = base.join(&*data_assets);
             }
+        }
+        if settings
+            .input_asset
+            .as_ref()
+            .is_some_and(|name| name.trim().is_empty())
+        {
+            bail!("runtime input asset name must not be empty");
+        }
+        if settings
+            .active_input_map
+            .as_ref()
+            .is_some_and(|name| name.trim().is_empty())
+        {
+            bail!("runtime active input map name must not be empty");
         }
         Ok(settings)
     }

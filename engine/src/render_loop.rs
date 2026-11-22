@@ -64,10 +64,28 @@ impl RenderLoop {
             log::info!("Shader compilation completed.");
             return Ok(());
         }
-        let _data_assets = match &settings.data_assets {
+        let data_assets = match &settings.data_assets {
             Some(path) => crate::data::DataAssetDatabase::load_dir(path)
                 .with_context(|| format!("Failed to load data assets from {}", path.display()))?,
             None => crate::data::DataAssetDatabase::from_documents(Vec::new())?,
+        };
+        let input_system = match settings.input_asset.as_deref() {
+            Some(name) => {
+                let input_asset = data_assets
+                    .get::<crate::input::Input>(name)
+                    .ok_or_else(|| anyhow!("input data asset '{name}' was not loaded"))?;
+                let mut input = crate::input::InputSystem::from_data_asset(&input_asset)?;
+                if let Some(map) = settings.active_input_map.as_deref() {
+                    input.set_active_map(map)?;
+                }
+                Some(input)
+            }
+            None if settings.active_input_map.is_some() => {
+                return Err(anyhow!(
+                    "runtime active_input_map requires an input_asset to be configured"
+                ));
+            }
+            None => None,
         };
         let first_pass = pipeline
             .passes
@@ -116,6 +134,9 @@ impl RenderLoop {
                 .to_path_buf(),
         });
         let mut scene = Scene::load(&settings.default_scene, &registry)?;
+        if let Some(input_system) = input_system {
+            scene.configure_input(input_system)?;
+        }
         scene.initialize()?;
         let size = window.inner_size();
         let initial_frame = frame_for_scene(
@@ -143,52 +164,114 @@ impl RenderLoop {
 
         let event_result = event_loop.run(move |event, elwt| match event {
             Event::AboutToWait => window.request_redraw(),
-            Event::WindowEvent { event, .. } => match event {
-                WindowEvent::RedrawRequested if !elwt.exiting() => {
-                    let size = window.inner_size();
-                    if size.width == 0 || size.height == 0 {
-                        return;
-                    }
-                    let now = Instant::now();
-                    let delta = now.duration_since(previous_frame).as_secs_f32();
-                    previous_frame = now;
-                    let update_result = callback_scene.borrow_mut().update(delta, &mut graphics);
-                    let result = update_result
-                        .and_then(|()| {
-                            let frame = frame_for_scene(
-                                &callback_scene.borrow(),
-                                &default_camera,
-                                size.width as f32 / size.height as f32,
-                                pipeline.render_buffers.shadow_cascades,
-                            )?;
-                            app.set_frame_uniform(frame)
-                        })
-                        .and_then(|()| app.render(&mut graphics));
-                    match result {
-                        Ok(()) => {
-                            rendered_frames += 1;
-                            if let Some(limit) = options.frame_limit {
-                                log::info!("Rendered frame {rendered_frames}/{limit}.");
-                                if rendered_frames >= limit {
-                                    elwt.exit();
-                                }
+            Event::WindowEvent { event, .. } => {
+                let handle_input = |input| {
+                    if let Err(error) = callback_scene.borrow().consume_input(input) {
+                        log::error!("Input processing failed: {error:#}");
+                        match callback_error.lock() {
+                            Ok(mut slot) => {
+                                *slot = Some(format!("Input processing failed: {error:#}"))
+                            }
+                            Err(poisoned) => {
+                                *poisoned.into_inner() =
+                                    Some(format!("Input processing failed: {error:#}"))
                             }
                         }
-                        Err(error) => {
-                            log::error!("Rendering failed: {error:#}");
-                            match callback_error.lock() {
-                                Ok(mut slot) => *slot = Some(format!("{error:#}")),
-                                Err(poisoned) => {
-                                    *poisoned.into_inner() = Some(format!("{error:#}"))
+                        elwt.exit();
+                    }
+                };
+                match event {
+                    WindowEvent::RedrawRequested if !elwt.exiting() => {
+                        let size = window.inner_size();
+                        if size.width == 0 || size.height == 0 {
+                            return;
+                        }
+                        let now = Instant::now();
+                        let delta = now.duration_since(previous_frame).as_secs_f32();
+                        previous_frame = now;
+                        let update_result =
+                            callback_scene.borrow_mut().update(delta, &mut graphics);
+                        let result = update_result
+                            .and_then(|()| {
+                                let frame = frame_for_scene(
+                                    &callback_scene.borrow(),
+                                    &default_camera,
+                                    size.width as f32 / size.height as f32,
+                                    pipeline.render_buffers.shadow_cascades,
+                                )?;
+                                app.set_frame_uniform(frame)
+                            })
+                            .and_then(|()| app.render(&mut graphics));
+                        match result {
+                            Ok(()) => {
+                                rendered_frames += 1;
+                                if let Some(limit) = options.frame_limit {
+                                    log::info!("Rendered frame {rendered_frames}/{limit}.");
+                                    if rendered_frames >= limit {
+                                        elwt.exit();
+                                    }
                                 }
                             }
-                            elwt.exit();
+                            Err(error) => {
+                                log::error!("Rendering failed: {error:#}");
+                                match callback_error.lock() {
+                                    Ok(mut slot) => *slot = Some(format!("{error:#}")),
+                                    Err(poisoned) => {
+                                        *poisoned.into_inner() = Some(format!("{error:#}"))
+                                    }
+                                }
+                                elwt.exit();
+                            }
                         }
                     }
+                    WindowEvent::CloseRequested => elwt.exit(),
+                    WindowEvent::KeyboardInput { event, .. } => {
+                        if let winit::keyboard::PhysicalKey::Code(code) = event.physical_key {
+                            handle_input(crate::input::RawInput::Button {
+                                key_code: crate::input::codes::keyboard(code),
+                                pressed: event.state == winit::event::ElementState::Pressed,
+                            });
+                        }
+                    }
+                    WindowEvent::MouseInput { state, button, .. } => {
+                        let source = match button {
+                            winit::event::MouseButton::Left => crate::input::codes::MOUSE_LEFT,
+                            winit::event::MouseButton::Right => crate::input::codes::MOUSE_RIGHT,
+                            winit::event::MouseButton::Middle => crate::input::codes::MOUSE_MIDDLE,
+                            winit::event::MouseButton::Back => crate::input::codes::MOUSE_BACK,
+                            winit::event::MouseButton::Forward => {
+                                crate::input::codes::MOUSE_FORWARD
+                            }
+                            winit::event::MouseButton::Other(button) => {
+                                crate::input::codes::mouse_other(button)
+                            }
+                        };
+                        handle_input(crate::input::RawInput::Button {
+                            key_code: source,
+                            pressed: state == winit::event::ElementState::Pressed,
+                        });
+                    }
+                    WindowEvent::CursorMoved { position, .. } => {
+                        handle_input(crate::input::RawInput::CursorMoved(glam::Vec2::new(
+                            position.x as f32,
+                            position.y as f32,
+                        )));
+                    }
+                    WindowEvent::MouseWheel { delta, .. } => {
+                        let amount = match delta {
+                            winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                            winit::event::MouseScrollDelta::PixelDelta(position) => {
+                                position.y as f32
+                            }
+                        };
+                        handle_input(crate::input::RawInput::Scroll(amount));
+                    }
+                    WindowEvent::Focused(false) => {
+                        handle_input(crate::input::RawInput::FocusLost);
+                    }
+                    _ => {}
                 }
-                WindowEvent::CloseRequested => elwt.exit(),
-                _ => {}
-            },
+            }
             _ => {}
         });
         let destroy_result = scene.borrow().destroy();
@@ -414,6 +497,8 @@ mod tests {
                 pipeline: PathBuf::from("missing.pipe"),
                 default_scene: PathBuf::from("missing.scene"),
                 data_assets: None,
+                input_asset: None,
+                active_input_map: None,
             },
             RenderLoopOptions {
                 frame_limit: Some(0),

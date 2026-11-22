@@ -7,6 +7,7 @@ pub mod app;
 pub mod data;
 pub mod ecs;
 pub mod graphics;
+pub mod input;
 pub mod material;
 mod parsers;
 pub mod postprocess;

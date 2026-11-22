@@ -1,5 +1,5 @@
 use crate::data::data_asset::DataRef;
-use crate::data::key_binding::KeyBinding;
+use crate::input::key_binding::KeyBinding;
 use component_macros::DataAsset;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

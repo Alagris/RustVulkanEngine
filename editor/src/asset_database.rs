@@ -875,7 +875,7 @@ passes:
         assert!(
             database
                 .data_assets()
-                .get::<engine::data::input::Input>("Shared")
+                .get::<engine::input::Input>("Shared")
                 .is_some()
         );
         assert!(

@@ -424,7 +424,7 @@ impl<'de, T: ?Sized + DataAssetTarget> Deserialize<'de> for DataRef<T> {
                 }
                 let (cell, name, type_name) =
                     T::resolve_link(&context, &name, type_name.as_deref())
-                        .map_err(serde::de::Error::custom)?;
+                        .map_err(|error| serde::de::Error::custom(format!("{error:#}")))?;
                 return Ok(Self::linked(cell, name, type_name));
             }
             let type_key = Value::String("type".to_owned());
@@ -445,12 +445,12 @@ impl<'de, T: ?Sized + DataAssetTarget> Deserialize<'de> for DataRef<T> {
                     ));
                 }
                 let cell = T::deserialize_nested(&context, Some(&type_name), nested_data)
-                    .map_err(serde::de::Error::custom)?;
+                    .map_err(|error| serde::de::Error::custom(format!("{error:#}")))?;
                 return Ok(Self::owned(cell));
             }
         }
-        let cell =
-            T::deserialize_nested(&context, None, value).map_err(serde::de::Error::custom)?;
+        let cell = T::deserialize_nested(&context, None, value)
+            .map_err(|error| serde::de::Error::custom(format!("{error:#}")))?;
         Ok(Self::owned(cell))
     }
 }
