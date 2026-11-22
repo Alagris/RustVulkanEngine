@@ -9,6 +9,7 @@ use crate::input::input_type::{InputType, source_type};
 use crate::input::key_binding::KeyBinding;
 use crate::input::keymap::KeyMap;
 use crate::input::modifier::{InputEvent, InputModifier, InputState, InputValue, Modifier};
+use crate::input::mouse::{MouseControl, MouseGrabMode};
 use anyhow::{Result, anyhow, bail};
 use glam::Vec2;
 use std::any::TypeId;
@@ -20,6 +21,7 @@ use std::rc::{Rc, Weak};
 pub enum RawInput {
     Button { key_code: u32, pressed: bool },
     CursorMoved(Vec2),
+    MouseMotion(Vec2),
     Scroll(f32),
     FocusLost,
 }
@@ -30,6 +32,7 @@ pub struct InputSystem {
     active_map: Option<usize>,
     pressed_buttons: HashSet<u32>,
     cursor_position: Option<Vec2>,
+    mouse: Option<MouseControl>,
 }
 
 impl Default for InputSystem {
@@ -40,11 +43,57 @@ impl Default for InputSystem {
             active_map: None,
             pressed_buttons: HashSet::new(),
             cursor_position: None,
+            mouse: None,
         }
     }
 }
 
 impl InputSystem {
+    pub(crate) fn attach_window(&mut self, window: Rc<winit::window::Window>) -> Result<()> {
+        self.mouse = Some(MouseControl::new(window)?);
+        self.cursor_position = None;
+        Ok(())
+    }
+
+    pub fn set_mouse_grab(&mut self, mode: MouseGrabMode) -> Result<()> {
+        self.mouse
+            .as_mut()
+            .ok_or_else(|| anyhow!("mouse control requires a window"))?
+            .set_mode(mode)?;
+        self.cursor_position = None;
+        Ok(())
+    }
+
+    pub fn mouse_grab(&self) -> Result<MouseGrabMode> {
+        Ok(self
+            .mouse
+            .as_ref()
+            .ok_or_else(|| anyhow!("mouse control requires a window"))?
+            .mode())
+    }
+
+    pub fn set_mouse_visible(&mut self, visible: bool) -> Result<()> {
+        self.mouse
+            .as_mut()
+            .ok_or_else(|| anyhow!("mouse control requires a window"))?
+            .set_visible(visible);
+        Ok(())
+    }
+
+    pub(crate) fn set_mouse_focus(&mut self, focused: bool) -> Result<()> {
+        self.cursor_position = None;
+        if let Some(mouse) = self.mouse.as_mut() {
+            mouse.set_focus(focused)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn uses_raw_mouse_motion(&self) -> bool {
+        self.mouse
+            .as_ref()
+            .is_some_and(MouseControl::uses_raw_motion)
+    }
+
     pub fn from_data_asset(input: &DataRef<Input>) -> Result<Self> {
         let compiled_maps = input
             .with(|input| {
@@ -254,14 +303,10 @@ impl InputSystem {
                     return Ok(notifications);
                 };
                 let delta = position - previous;
-                if delta == Vec2::ZERO {
-                    return Ok(notifications);
-                }
-                self.route(
-                    input_code::MOUSE_MOVE,
-                    InputEvent::new(InputState::Ongoing, InputValue::Vector2(delta)),
-                    &mut notifications,
-                )?;
+                self.route_mouse_motion(delta, &mut notifications)?;
+            }
+            RawInput::MouseMotion(delta) => {
+                self.route_mouse_motion(delta, &mut notifications)?;
             }
             RawInput::Scroll(amount) => {
                 if !amount.is_finite() {
@@ -299,6 +344,24 @@ impl InputSystem {
             }
         }
         Ok(notifications)
+    }
+
+    fn route_mouse_motion(
+        &mut self,
+        delta: Vec2,
+        notifications: &mut Vec<InputNotification>,
+    ) -> Result<()> {
+        if !delta.is_finite() {
+            bail!("mouse motion must be finite");
+        }
+        if delta != Vec2::ZERO {
+            self.route(
+                input_code::MOUSE_MOVE,
+                InputEvent::new(InputState::Ongoing, InputValue::Vector2(delta)),
+                notifications,
+            )?;
+        }
+        Ok(())
     }
 
     pub(crate) fn update(&mut self, delta_time: f32) -> Result<Vec<InputNotification>> {
@@ -847,6 +910,65 @@ mod tests {
             .into_iter()
             .map(|notification| notification.event.state)
             .collect()
+    }
+
+    #[test]
+    fn raw_mouse_motion_is_routed_and_validated() {
+        let yaml =
+            single_binding_input("Gameplay", "look", input_code::MOUSE_MOVE, "Vector2", None);
+        let (_database, mut input) = load_input(&yaml).unwrap();
+        let _component = subscribe_noop(&mut input, "Gameplay", "look");
+        assert_eq!(
+            notifications(
+                input
+                    .consume(RawInput::MouseMotion(Vec2::new(4.0, -3.0)))
+                    .unwrap()
+            ),
+            [(
+                InputState::Ongoing,
+                InputValue::Vector2(Vec2::new(4.0, -3.0))
+            )]
+        );
+        assert!(
+            input
+                .consume(RawInput::MouseMotion(Vec2::ZERO))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            input
+                .consume(RawInput::MouseMotion(Vec2::new(f32::NAN, 1.0)))
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("mouse motion must be finite")
+        );
+    }
+
+    #[test]
+    fn mouse_control_requires_a_window() {
+        let mut input = InputSystem::default();
+        assert!(
+            input
+                .set_mouse_grab(MouseGrabMode::Confined)
+                .unwrap_err()
+                .to_string()
+                .contains("requires a window")
+        );
+        assert!(
+            input
+                .set_mouse_visible(false)
+                .unwrap_err()
+                .to_string()
+                .contains("requires a window")
+        );
+        assert!(
+            input
+                .mouse_grab()
+                .unwrap_err()
+                .to_string()
+                .contains("requires a window")
+        );
     }
 
     #[test]

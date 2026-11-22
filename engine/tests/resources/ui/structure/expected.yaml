@@ -1,0 +1,9 @@
+sheets: [rules.css]
+scenarios:
+  - styles:
+      root: { background: gray }
+      first: { font-size: 12px }
+      second: { foreground: gold, background: blue, text-align: center }
+      third: { background: blue, text-align: center }
+      nested: {}
+      inside: { font-size: 12px }

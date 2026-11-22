@@ -1,0 +1,4 @@
+<Overlay id="root">
+  <Include src="part.xml" id="instance" class="special" orientation="horizontal"/>
+  <Label id="last"/>
+</Overlay>

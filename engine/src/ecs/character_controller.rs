@@ -69,10 +69,7 @@ impl Collider for CharacterController {
 
 impl Component for CharacterController {
     fn try_start(&mut self, _: &Scene, _: &GameObject) -> Result<crate::ecs::Features> {
-        Ok(crate::ecs::Features {
-            has_physics: true,
-            ..Default::default()
-        })
+        Ok(crate::ecs::PHYSICS)
     }
 
     fn sync_physics(&mut self, scene: &Scene, object: &GameObject) -> Result<()> {
@@ -121,10 +118,7 @@ mod tests {
 
     impl Component for CustomCollider {
         fn try_start(&mut self, _: &Scene, _: &GameObject) -> Result<crate::ecs::Features> {
-            Ok(crate::ecs::Features {
-                has_physics: true,
-                ..Default::default()
-            })
+            Ok(crate::ecs::PHYSICS)
         }
 
         fn sync_physics(&mut self, scene: &Scene, object: &GameObject) -> Result<()> {

@@ -1,0 +1,7 @@
+sheets: [base.css]
+scenarios:
+  - styles:
+      root: { foreground: white }
+      title: { foreground: white, font-size: 16px }
+      ok: { foreground: yellow, font-size: 16px, left: 10px, right: 5%, background: blue }
+      icon: { foreground: white, top: 0px, bottom: 20% }

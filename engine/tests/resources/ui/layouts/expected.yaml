@@ -1,0 +1,13 @@
+sheets: [rules.css]
+scenarios:
+  - styles:
+      root: { background: gray }
+      scroll: { background: gray }
+      stack: { background: gray }
+      label: { foreground: blue }
+      grid: { background: gray }
+      image: { foreground: blue }
+      list: { background: gray }
+      button: { foreground: blue }
+      table: { background: gray, foreground: blue, top: 30% }
+      overlay: { background: gray, foreground: blue }

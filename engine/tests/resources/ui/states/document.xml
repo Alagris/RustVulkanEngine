@@ -1,0 +1,4 @@
+<Canvas id="root" class="panel">
+  <Button id="button" class="action"/>
+  <Label id="label"/>
+</Canvas>

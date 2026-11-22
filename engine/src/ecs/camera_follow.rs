@@ -52,10 +52,7 @@ impl Component for CameraFollow {
             Some(object.get_component_weak::<Camera>().ok_or_else(|| {
                 anyhow!("CameraFollow requires a Camera on the same game object")
             })?);
-        Ok(crate::ecs::Features {
-            late_update: true,
-            ..Default::default()
-        })
+        Ok(crate::ecs::LATE)
     }
 
     fn late_update(&mut self, scene: &Scene, object: &GameObject) -> Result<()> {

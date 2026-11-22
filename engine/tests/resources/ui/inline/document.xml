@@ -1,0 +1,5 @@
+<Canvas id="root" style="background: black;">
+  <Label id="label" style="foreground: red; font-size: 14px;">Typed style</Label>
+  <Image id="image" src="icon.png" style="background: url(&quot;a b.png&quot;); left: 20%;"/>
+  <Include src="../includes/leaf.xml" id="included" style="foreground: blue;"/>
+</Canvas>

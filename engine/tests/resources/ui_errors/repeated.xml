@@ -1,0 +1,4 @@
+<Canvas>
+  <Include src="../ui/includes/part.xml" id="first"/>
+  <Include src="../ui/includes/part.xml" id="second"/>
+</Canvas>

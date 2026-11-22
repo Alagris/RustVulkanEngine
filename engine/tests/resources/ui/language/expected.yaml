@@ -1,0 +1,8 @@
+sheets: [rules.css]
+scenarios:
+  - styles:
+      root: { foreground: red, text-align: right, background: green, font-size: 11px }
+      english: { foreground: red, text-align: right, background: green, font-size: 11px }
+      child: { foreground: blue, text-align: left, background: green }
+      french: { foreground: blue, text-align: left, background: green }
+      none: { text-align: right }

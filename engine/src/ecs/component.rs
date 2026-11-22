@@ -17,13 +17,19 @@ pub struct ComponentInstance {
     component: Option<Weak<RefCell<dyn Component>>>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-/// Lifecycle callbacks requested by a component at startup.
-pub struct Features {
-    pub updatable: bool,
-    pub has_physics: bool,
-    pub late_update: bool,
+bitflags::bitflags! {
+    /// Lifecycle callbacks requested by a component at startup.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Features: u8 {
+        const UPDATE = 1 << 0;
+        const PHYSICS = 1 << 1;
+        const LATE = 1 << 2;
+    }
 }
+
+pub const UPDATE: Features = Features::UPDATE;
+pub const PHYSICS: Features = Features::PHYSICS;
+pub const LATE: Features = Features::LATE;
 
 pub trait ComponentMetadata {
     const TYPE_NAME: &'static str;

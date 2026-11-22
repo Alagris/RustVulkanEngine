@@ -1,0 +1,9 @@
+sheets: [rules.css]
+scenarios:
+  - states:
+      label: [hover]
+    styles:
+      root: { foreground: white, background: black }
+      label: { foreground: red, font-size: 14px }
+      image: { foreground: white, background: 'url("a b.png")', left: 20%, top: 2px }
+      included: { foreground: blue }

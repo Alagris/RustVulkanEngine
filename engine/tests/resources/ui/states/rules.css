@@ -1,0 +1,6 @@
+* { foreground: white; background: black; }
+.action:not(:hover) { text-align: left; }
+.panel:hover Button { background: orange; }
+Button:hover { foreground: yellow; }
+Button:hover:active { foreground: red; }
+Button:focus { font-size: 20px; }

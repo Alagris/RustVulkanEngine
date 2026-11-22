@@ -18,6 +18,9 @@ data:
           right:
             type: KeyBinding
             data: { key: 22, input_type: Bool }
+          jump:
+            type: KeyBinding
+            data: { key: 62, input_type: Bool }
           look:
             type: KeyBinding
             data: { key: 65536, input_type: Vector2 }

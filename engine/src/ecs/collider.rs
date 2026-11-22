@@ -69,10 +69,7 @@ macro_rules! impl_static_collider {
                 _: &crate::ecs::Scene,
                 _: &crate::ecs::GameObject,
             ) -> anyhow::Result<crate::ecs::Features> {
-                Ok(crate::ecs::Features {
-                    has_physics: true,
-                    ..Default::default()
-                })
+                Ok(crate::ecs::PHYSICS)
             }
             fn sync_physics(
                 &mut self,

@@ -1,0 +1,6 @@
+Stack > .item:nth-child(2) { foreground: gold; }
+.item + .item { background: blue; }
+Label:not(.special) { font-size: 12px; }
+Stack:has(> Canvas) { background: gray; }
+:is(Button, [name="primary"]) { text-align: center; }
+Canvas ~ Label { left: 3px; }

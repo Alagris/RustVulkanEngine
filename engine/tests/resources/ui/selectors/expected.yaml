@@ -1,0 +1,8 @@
+sheets: [rules.css]
+scenarios:
+  - styles:
+      root: { background: yellow }
+      one: { foreground: red }
+      two: { foreground: blue, background: green }
+      three: { text-align: right, top: 2% }
+      four: { font-size: 4px, text-align: right, top: 2% }

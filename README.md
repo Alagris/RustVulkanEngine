@@ -257,12 +257,22 @@ use the constants in `engine::input::codes`: `MOUSE_LEFT`, `MOUSE_RIGHT`,
 `MOUSE_MIDDLE`, `MOUSE_BACK`, `MOUSE_FORWARD`, `MOUSE_MOVE`, and `SCROLL`.
 Wheel values are `-1` or `1`.
 
+The game window confines and hides the cursor by default while focused, and
+releases it and shows it when focus is lost. `Scene::capture_mouse`,
+`confine_mouse`, `release_mouse`, and `set_mouse_visible` change this behavior;
+`set_mouse_grab` accepts a `MouseGrabMode`. Capture attempts cursor locking and
+falls back to confinement if locking is unavailable. Grabbed mouse movement uses
+relative device motion; free movement uses cursor position deltas. Mouse control
+requires an attached game window and reports failures.
+
 Scene and prefab YAML share the same root object format. A scene can provide
 `deltaTime`, `timeSinceStart`, a root object, children, transforms, and typed
 component data. The engine initializes components in two phases (`awake`,
 then `try_start`); its `Features` result selects the `update`, `sync_physics`
 and `late_update` callbacks the component receives each
-frame. `update` now also receives the owning `GameObject` and `Graphics`, so
+frame. Import `engine::ecs::{UPDATE, PHYSICS, LATE}` and return combinations
+such as `Ok(UPDATE | PHYSICS)`; `Features::empty()` requests none.
+`update` now also receives the owning `GameObject` and `Graphics`, so
 rendering and component updates happen in one callback. `awake`, `try_start`, and
 `destroy` also receive their owning object.
 
@@ -283,6 +293,82 @@ Parents own their child objects directly. `GameObject::weak_reference` creates
 a non-owning handle that can be resolved through `Scene::resolve_game_object`;
 the scene prunes expired object handles during update.
 
+### UI documents and styles
+
+`engine::ui` provides a renderer-independent UI document tree for both games
+and the editor. `Label`, `Button` and `Image` are elements; `Canvas`,
+`ScrollPane`, `Grid`, `List`, `Table`, `Stack` and `Overlay` are layouts.
+`Stack` accepts an `orientation` attribute of `horizontal` or `vertical`
+(the default). Geometry, scrolling, virtualization and rendering are not yet
+implemented.
+
+Create a tree in code with `Document::new`, `append`, `move_to`, `remove`,
+typed `edit`, `set_attribute` and `set_text`, or parse XML using `Document::parse` or
+`Document::load`. IDs, names and classes are indexed and can be found with
+`find_id`, `find_name` and `find_class`. IDs need not be unique. Element types
+are in `engine::ui::elem`; their common `ElementData<S>` has typed `id`, `name`,
+`class`, `lang`, `dir` and `style: S` fields. XML `xml:lang` is an alias for
+`lang`. `Label` and `Button` hold text,
+`Image` has an optional `src`, and `Stack` has a typed orientation. Unknown
+attributes and non-whitespace text on elements without text are rejected;
+whitespace-only XML text in those elements is ignored.
+
+`#[element(style = LabelStyle)]` injects the public, Serde-flattened `data`
+field before the derives run. `#[derive(Element)]` generates the tag,
+typed attribute adapters, text accessors (for `#[ui(text)]` fields), and
+the `Element` implementation; add `layout` to the attribute for containers.
+`#[derive(Attributes)]` generates the same adapters for common attribute
+groups, respecting Serde `rename` and `flatten`. Custom attribute value types
+implement `AttributeValue`. Put `#[element(...)]` **above** `#[derive(...)]`.
+
+Every built-in element has its own style type, such as `LabelStyle` or
+`ImageStyle`, deriving `UiStyle`. Fields are typed `Option` values; images
+support colors, background images and offsets, but not text properties.
+Custom style types can derive `UiStyle` using any subset of the supported
+style fields. Edit inline styles directly, for example
+`document.edit::<Label>(id, |label| label.data.style.font_size = Some(Length::Pixels(18.0)))`.
+XML and `set_attribute` also accept `style="foreground: red; font-size: 18px;"`.
+These declarations are deserialized into the element's style type, not stored
+as strings; invalid or inapplicable properties produce errors without
+replacing the previous value. Inline styles override all stylesheet rules,
+including interactive-state rules. `style(id)` returns the computed typed
+`Style` and reports properties unsupported by that element's style type.
+
+```xml
+<Canvas id="screen">
+  <Include src="toolbar.xml" id="toolbar" class="main-toolbar"/>
+  <Label id="title">Hello</Label>
+</Canvas>
+```
+
+`Include` substitutes an independent copy of the referenced document's root.
+Paths are relative to the containing file; attributes other than `src` override
+the included root's attributes. Includes cannot contain children and cycles
+are errors. Includes require `Document::load`, not `Document::parse`.
+
+Parse one or more `Stylesheet`s and pass them, in order, to
+`StyledDocument::new`. Rules and declarations are applied in source order:
+later declarations win, without CSS specificity or inheritance. Styles and
+declarations use typed values: `foreground` accepts named or hexadecimal
+colors (including `transparent`); `background` also accepts `url(...)`;
+`text-align` accepts `left`, `center` or `right`; `font-size`, `left`, `right`,
+`top` and `bottom` accept finite `px` or `%` values. Font sizes cannot be
+negative. Unknown properties and invalid values are rejected. Element type
+selectors are case-sensitive. Structural selectors, supported attributes,
+combinators, `:is`, `:where`, `:not`, `:has`, `:lang` and `:dir` are supported.
+`xml:lang` and `dir="ltr|rtl"` inherit through the tree for matching. XML
+namespaces other than `xml:lang`, CSS pseudo-elements,
+at-rules, browser link history, shadow-tree selectors, table-column selectors,
+and other selector features without a UI model are rejected.
+
+Applications set the interactive states `hover`, `active`, `focus`, `enabled`,
+`disabled` and `checked` explicitly with `set_state`. `style` returns the
+current typed style.
+Only properties differing from the base style are stored for active states.
+`set_stylesheets` replaces the ordered sheets and recomputes only elements
+matched by changed rules in the current or base state; document edits and state
+changes invalidate structural matches.
+
 ### Physics and camera follow
 
 Scenes create a thread-affine physics world on demand. `SphereCollider`,
@@ -295,7 +381,8 @@ contact flags. Callers must supply gravity themselves.
 
 All collider components implement `Collider`, whose primitive associated type
 identifies the shape. Custom components can store `PhysicsCollider<Primitive>`,
-return `Features { has_physics: true, ..Default::default() }` from `try_start`,
+return `PHYSICS` from `try_start` (or combine flags such as
+`UPDATE | PHYSICS | LATE`),
 call `sync_static` from `sync_physics`, and call `remove` from `destroy`.
 `Scene::with_physics` provides access to the underlying world. Invalid or
 sheared physics transforms are reported as errors. Spheres require uniform
@@ -319,7 +406,8 @@ mode-specific distance and damping:
 
 The sample game's `PlayerController` requires `CharacterController`,
 `CameraFollow`, and `Camera` on the same object. Its `Gameplay` input map
-provides WASD movement and mouse look; the controller supplies gravity.
+provides WASD movement, mouse look, and Space to jump; `jump_force` configures
+the initial upward velocity, and the controller supplies gravity.
 Orbit cameras do not yet avoid obstructions.
 
 Use the `#[component]` attribute with `#[derive(Component)]` to inject the

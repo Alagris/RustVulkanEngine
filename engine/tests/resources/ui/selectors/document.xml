@@ -1,0 +1,6 @@
+<Canvas id="root">
+  <Label id="one" class="item small round" name="Hello World"/>
+  <Button id="two" class="item chosen" name="EN-us"/>
+  <Label id="three" class="item chosen"/>
+  <Label id="four"/>
+</Canvas>

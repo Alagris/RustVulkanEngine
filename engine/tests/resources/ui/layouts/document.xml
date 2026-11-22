@@ -1,0 +1,7 @@
+<Canvas id="root">
+  <ScrollPane id="scroll"><Stack id="stack"><Label id="label"/></Stack></ScrollPane>
+  <Grid id="grid"><Image id="image"/></Grid>
+  <List id="list"><Button id="button"/></List>
+  <Table id="table"/>
+  <Overlay id="overlay"/>
+</Canvas>

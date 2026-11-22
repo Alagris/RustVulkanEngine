@@ -15,6 +15,7 @@ pub mod proc_mesh;
 pub mod render_loop;
 pub mod render_pipeline;
 pub mod settings;
+pub mod ui;
 
 pub use app::App;
 pub use graphics::{FrameUniform, Graphics};

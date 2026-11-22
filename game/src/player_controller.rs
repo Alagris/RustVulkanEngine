@@ -19,6 +19,7 @@ pub struct PlayerController {
     pub speed: f32,
     pub mouse_sensitivity: f32,
     pub gravity: f32,
+    pub jump_force: f32,
     #[serde(skip)]
     controller: Option<ComponentWeak<CharacterController>>,
     #[serde(skip)]
@@ -29,6 +30,10 @@ pub struct PlayerController {
     mouse_delta: Vec2,
     #[serde(skip)]
     vertical_velocity: f32,
+    #[serde(skip)]
+    grounded: bool,
+    #[serde(skip)]
+    jump_requested: bool,
 }
 
 impl Default for PlayerController {
@@ -39,11 +44,14 @@ impl Default for PlayerController {
             speed: 4.0,
             mouse_sensitivity: 0.002,
             gravity: 9.81,
+            jump_force: 5.0,
             controller: None,
             camera: None,
             buttons: [false; 4],
             mouse_delta: Vec2::ZERO,
             vertical_velocity: 0.0,
+            grounded: false,
+            jump_requested: false,
         }
     }
 }
@@ -70,6 +78,13 @@ impl PlayerController {
             self.mouse_delta += delta;
         }
     }
+    fn jump(&mut self, _: &Scene, _: &str, _: u32, state: InputState, value: InputValue) {
+        if matches!(state, InputState::Started | InputState::Triggered)
+            && matches!(value, InputValue::Bool(true))
+        {
+            self.jump_requested = true;
+        }
+    }
 }
 
 impl Component for PlayerController {
@@ -84,12 +99,13 @@ impl Component for PlayerController {
                 .get_component_weak::<CameraFollow>()
                 .ok_or_else(|| anyhow!("PlayerController requires a CameraFollow"))?,
         );
-        let subscriptions: [(&str, engine::input::InputCallback<Self>); 5] = [
+        let subscriptions: [(&str, engine::input::InputCallback<Self>); 6] = [
             ("forward", Self::forward),
             ("back", Self::back),
             ("left", Self::left),
             ("right", Self::right),
             ("look", Self::look),
+            ("jump", Self::jump),
         ];
         for (binding, _) in subscriptions {
             let expected = if binding == "look" {
@@ -111,13 +127,13 @@ impl Component for PlayerController {
                     .with_context(|| format!("PlayerController input binding '{binding}'"));
             }
         }
-        Ok(engine::ecs::Features {
-            updatable: true,
-            ..Default::default()
-        })
+        Ok(engine::ecs::UPDATE)
     }
 
     fn update(&mut self, scene: &Scene, object: &GameObject, _: &mut Graphics) -> Result<()> {
+        if !self.jump_force.is_finite() || self.jump_force <= 0.0 {
+            bail!("player jump force must be finite and positive");
+        }
         if !self.speed.is_finite()
             || self.speed < 0.0
             || !self.mouse_sensitivity.is_finite()
@@ -145,6 +161,12 @@ impl Component for PlayerController {
         if dt == 0.0 {
             return Ok(());
         }
+        let mut jump_requested = std::mem::take(&mut self.jump_requested);
+        if jump_requested && self.grounded {
+            self.vertical_velocity = self.jump_force;
+            self.grounded = false;
+            jump_requested = false;
+        }
         self.vertical_velocity -= self.gravity * dt;
         let columns: [[f32; 4]; 4] = object.world_transform().into();
         let transform = Mat4::from_cols_array_2d(&columns);
@@ -163,8 +185,16 @@ impl Component for PlayerController {
             .ok_or_else(|| anyhow!("player controller is not initialized"))?
             .with_mut(|controller| controller.move_by(scene, object, displacement, dt))
             .ok_or_else(|| anyhow!("player character controller no longer exists"))??;
-        if result.down && self.vertical_velocity < 0.0 {
+        if result.up && self.vertical_velocity > 0.0 {
             self.vertical_velocity = 0.0;
+        }
+        self.grounded = result.down && self.vertical_velocity <= 0.0;
+        if self.grounded {
+            self.vertical_velocity = 0.0;
+            if jump_requested {
+                self.vertical_velocity = self.jump_force;
+                self.grounded = false;
+            }
         }
         Ok(())
     }
@@ -218,6 +248,13 @@ root:
         - type: Camera
         - type: CameraFollow
         - type: PlayerController
+    - name: Ceiling
+      transform:
+        translation: [0.0, 3.8, 0.0]
+      components:
+        - type: BoxCollider
+          data:
+            half_extents: [10.0, 0.1, 10.0]
 "#,
             &ComponentRegistry::new(),
         )
@@ -280,6 +317,79 @@ root:
                 assert!(forward.y < -0.05);
             })
             .unwrap();
+        let controller = player
+            .borrow()
+            .get_component_weak::<PlayerController>()
+            .unwrap();
+        for _ in 0..30 {
+            scene.update(0.05, &mut Graphics::default()).unwrap();
+        }
+        assert!(controller.with(|player| player.grounded).unwrap());
+        controller
+            .with_mut(|player| player.jump_force = 8.0)
+            .unwrap();
+        let ground_y = player.borrow().transform().translation.y;
+        let space = codes::keyboard(KeyCode::Space);
+        assert_eq!(space, 62);
+        scene
+            .consume_input(RawInput::Button {
+                key_code: space,
+                pressed: true,
+            })
+            .unwrap();
+        scene.update(0.0, &mut Graphics::default()).unwrap();
+        assert_eq!(player.borrow().transform().translation.y, ground_y);
+        scene.update(0.1, &mut Graphics::default()).unwrap();
+        assert!(player.borrow().transform().translation.y > ground_y + 0.6);
+        let first_velocity = controller.with(|player| player.vertical_velocity).unwrap();
+        scene
+            .consume_input(RawInput::Button {
+                key_code: space,
+                pressed: false,
+            })
+            .unwrap();
+        scene
+            .consume_input(RawInput::Button {
+                key_code: space,
+                pressed: true,
+            })
+            .unwrap();
+        scene.update(0.1, &mut Graphics::default()).unwrap();
+        assert!(controller.with(|player| player.vertical_velocity).unwrap() < first_velocity);
+        let mut hit_ceiling = false;
+        for _ in 0..60 {
+            scene.update(0.05, &mut Graphics::default()).unwrap();
+            hit_ceiling |= controller
+                .with(|player| !player.grounded && player.vertical_velocity == 0.0)
+                .unwrap();
+        }
+        assert!(hit_ceiling);
+        assert!(controller.with(|player| player.grounded).unwrap());
+        scene
+            .consume_input(RawInput::Button {
+                key_code: space,
+                pressed: false,
+            })
+            .unwrap();
+        let landed_y = player.borrow().transform().translation.y;
+        scene
+            .consume_input(RawInput::Button {
+                key_code: space,
+                pressed: true,
+            })
+            .unwrap();
+        scene.update(0.1, &mut Graphics::default()).unwrap();
+        assert!(player.borrow().transform().translation.y > landed_y + 0.6);
+        controller
+            .with_mut(|player| player.jump_force = f32::NAN)
+            .unwrap();
+        assert!(
+            scene
+                .update(0.1, &mut Graphics::default())
+                .unwrap_err()
+                .to_string()
+                .contains("jump force must be finite and positive")
+        );
         scene.destroy().unwrap();
     }
 

@@ -1,0 +1,3 @@
+Canvas, ScrollPane, Grid, List, Table, Stack, Overlay { background: gray; }
+:empty { foreground: blue; }
+Canvas > :nth-last-child(2) { top: 30%; }

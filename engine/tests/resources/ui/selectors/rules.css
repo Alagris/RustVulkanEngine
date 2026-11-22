@@ -1,0 +1,7 @@
+[class~="round"][name^="Hello"] { foreground: red; }
+[name|="en" i] { foreground: blue; }
+:nth-child(2 of .item) { background: green; }
+Label:nth-last-of-type(1) { font-size: 4px; }
+.chosen ~ Label { text-align: right; }
+Canvas:has(> .chosen + .chosen) { background: yellow; }
+:where(#three, #four) { top: 2%; }

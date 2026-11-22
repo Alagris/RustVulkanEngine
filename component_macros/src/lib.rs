@@ -7,6 +7,36 @@ use syn::{
     Attribute, Data, DeriveInput, Fields, Ident, ItemStruct, LitStr, Meta, Path, Token, parse_quote,
 };
 
+mod ui;
+
+#[proc_macro_attribute]
+pub fn element(arguments: TokenStream, input: TokenStream) -> TokenStream {
+    ui::element(arguments.into(), input.into())
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
+#[proc_macro_derive(Attributes, attributes(serde, ui))]
+pub fn derive_attributes(input: TokenStream) -> TokenStream {
+    ui::attributes(&parse_macro_input!(input as DeriveInput))
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
+#[proc_macro_derive(Element, attributes(serde, ui))]
+pub fn derive_element(input: TokenStream) -> TokenStream {
+    ui::derive_element(parse_macro_input!(input as DeriveInput))
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
+#[proc_macro_derive(UiStyle)]
+pub fn derive_ui_style(input: TokenStream) -> TokenStream {
+    ui::style(parse_macro_input!(input as DeriveInput))
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
 #[proc_macro_attribute]
 pub fn post_process(arguments: TokenStream, input: TokenStream) -> TokenStream {
     let type_name = parse_macro_input!(arguments as LitStr);

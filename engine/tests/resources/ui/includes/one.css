@@ -1,0 +1,2 @@
+Button { foreground: red; background: black; }
+.special[orientation="horizontal"] > Button { font-size: 18px; }

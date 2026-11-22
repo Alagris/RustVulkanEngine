@@ -325,13 +325,13 @@ impl Scene {
             }
             let features = component.try_start(self, &owner.borrow())?;
             component.started = true;
-            if features.updatable {
+            if features.contains(crate::ecs::UPDATE) {
                 self.update_components.push(component_ref.clone());
             }
-            if features.has_physics {
+            if features.contains(crate::ecs::PHYSICS) {
                 self.physics_components.push(component_ref.clone());
             }
-            if features.late_update {
+            if features.contains(crate::ecs::LATE) {
                 self.late_components.push(component_ref.clone());
             }
         }
@@ -439,6 +439,42 @@ impl Scene {
         }
         *self.input_system.get_mut() = input_system;
         Ok(())
+    }
+
+    pub(crate) fn attach_input_window(&mut self, window: Rc<winit::window::Window>) -> Result<()> {
+        self.input_system.get_mut().attach_window(window)
+    }
+
+    pub fn set_mouse_grab(&self, mode: crate::input::MouseGrabMode) -> Result<()> {
+        self.input_system.borrow_mut().set_mouse_grab(mode)
+    }
+
+    pub fn capture_mouse(&self) -> Result<()> {
+        self.set_mouse_grab(crate::input::MouseGrabMode::Captured)
+    }
+
+    pub fn confine_mouse(&self) -> Result<()> {
+        self.set_mouse_grab(crate::input::MouseGrabMode::Confined)
+    }
+
+    pub fn release_mouse(&self) -> Result<()> {
+        self.set_mouse_grab(crate::input::MouseGrabMode::Free)
+    }
+
+    pub fn mouse_grab(&self) -> Result<crate::input::MouseGrabMode> {
+        self.input_system.borrow().mouse_grab()
+    }
+
+    pub fn set_mouse_visible(&self, visible: bool) -> Result<()> {
+        self.input_system.borrow_mut().set_mouse_visible(visible)
+    }
+
+    pub(crate) fn set_mouse_focus(&self, focused: bool) -> Result<()> {
+        self.input_system.borrow_mut().set_mouse_focus(focused)
+    }
+
+    pub(crate) fn uses_raw_mouse_motion(&self) -> bool {
+        self.input_system.borrow().uses_raw_mouse_motion()
     }
 
     pub fn active_input_map(&self) -> Option<String> {
@@ -632,9 +668,10 @@ mod tests {
             _game_object: &GameObject,
         ) -> Result<crate::ecs::Features> {
             self.starts.set(self.starts.get() + 1);
-            Ok(crate::ecs::Features {
-                updatable: self.update_enabled,
-                ..Default::default()
+            Ok(if self.update_enabled {
+                crate::ecs::UPDATE
+            } else {
+                crate::ecs::Features::empty()
             })
         }
         fn update(
@@ -683,10 +720,7 @@ mod tests {
             game_object: &GameObject,
         ) -> Result<crate::ecs::Features> {
             self.calls.borrow_mut().push(("start", game_object.id()));
-            Ok(crate::ecs::Features {
-                updatable: true,
-                ..Default::default()
-            })
+            Ok(crate::ecs::UPDATE)
         }
         fn update(
             &mut self,
@@ -748,36 +782,15 @@ mod tests {
         scene.initialize().unwrap();
         let calls = Rc::new(RefCell::new(Vec::new()));
         for (label, features) in [
-            (
-                "update",
-                crate::ecs::Features {
-                    updatable: true,
-                    ..Default::default()
-                },
-            ),
-            (
-                "physics",
-                crate::ecs::Features {
-                    has_physics: true,
-                    ..Default::default()
-                },
-            ),
-            (
-                "late",
-                crate::ecs::Features {
-                    late_update: true,
-                    ..Default::default()
-                },
-            ),
+            ("update", crate::ecs::UPDATE),
+            ("physics", crate::ecs::PHYSICS),
+            ("late", crate::ecs::LATE),
             ("none", crate::ecs::Features::default()),
             (
                 "all",
-                crate::ecs::Features {
-                    updatable: true,
-                    has_physics: true,
-                    late_update: true,
-                },
+                crate::ecs::UPDATE | crate::ecs::PHYSICS | crate::ecs::LATE,
             ),
+            ("update_late", crate::ecs::UPDATE | crate::ecs::LATE),
         ] {
             scene
                 .root
@@ -803,8 +816,10 @@ mod tests {
                 ("all", "physics"),
                 ("update", "update"),
                 ("all", "update"),
+                ("update_late", "update"),
                 ("late", "late"),
                 ("all", "late"),
+                ("update_late", "late"),
             ]
         );
         scene
@@ -819,11 +834,13 @@ mod tests {
                 ("physics", "physics"),
                 ("all", "physics"),
                 ("all", "update"),
+                ("update_late", "update"),
                 ("late", "late"),
                 ("all", "late"),
+                ("update_late", "late"),
             ]
         );
-        assert_eq!(scene.update_component_count(), 1);
+        assert_eq!(scene.update_component_count(), 2);
     }
 
     fn registry(

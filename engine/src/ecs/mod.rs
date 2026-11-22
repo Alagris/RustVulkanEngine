@@ -33,7 +33,8 @@ pub use collider::{
 };
 pub use component::{
     Component, ComponentFactory, ComponentInstance, ComponentMetadata, ComponentRegistration,
-    ComponentRegistry, ComponentSerializer, ComponentTypeInfo, ComponentWeak, Features, Unique,
+    ComponentRegistry, ComponentSerializer, ComponentTypeInfo, ComponentWeak, Features, LATE,
+    PHYSICS, UPDATE, Unique,
 };
 pub use component_macros::{Component, component};
 pub use directional_light::DirectionalLight;

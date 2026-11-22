@@ -21,7 +21,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use winit::dpi::LogicalSize;
-use winit::event::{Event, WindowEvent};
+use winit::event::{DeviceEvent, Event, WindowEvent};
 use winit::event_loop::EventLoop;
 use winit::window::WindowBuilder;
 
@@ -103,14 +103,16 @@ impl RenderLoop {
         let default_camera = Camera::default();
 
         let event_loop = EventLoop::new()?;
-        let window = WindowBuilder::new()
-            .with_title(if options.title.is_empty() {
-                "Rust Vulkan Game Engine"
-            } else {
-                &options.title
-            })
-            .with_inner_size(LogicalSize::new(1024, 768))
-            .build(&event_loop)?;
+        let window = Rc::new(
+            WindowBuilder::new()
+                .with_title(if options.title.is_empty() {
+                    "Rust Vulkan Game Engine"
+                } else {
+                    &options.title
+                })
+                .with_inner_size(LogicalSize::new(1024, 768))
+                .build(&event_loop)?,
+        );
         let size = window.inner_size();
         let frame_uniform = default_camera.frame_uniform(
             size.width as f32 / size.height.max(1) as f32,
@@ -137,6 +139,7 @@ impl RenderLoop {
         if let Some(input_system) = input_system {
             scene.configure_input(input_system)?;
         }
+        scene.attach_input_window(Rc::clone(&window))?;
         scene.initialize()?;
         let size = window.inner_size();
         let initial_frame = frame_for_scene(
@@ -162,25 +165,37 @@ impl RenderLoop {
         let mut rendered_frames = 0_u32;
         let mut previous_frame = Instant::now();
 
-        let event_result = event_loop.run(move |event, elwt| match event {
-            Event::AboutToWait => window.request_redraw(),
-            Event::WindowEvent { event, .. } => {
-                let handle_input = |input| {
-                    if let Err(error) = callback_scene.borrow().consume_input(input) {
-                        log::error!("Input processing failed: {error:#}");
-                        match callback_error.lock() {
-                            Ok(mut slot) => {
-                                *slot = Some(format!("Input processing failed: {error:#}"))
-                            }
-                            Err(poisoned) => {
-                                *poisoned.into_inner() =
-                                    Some(format!("Input processing failed: {error:#}"))
-                            }
-                        }
-                        elwt.exit();
+        let event_result = event_loop.run(move |event, elwt| {
+            let report_input_error = |error: anyhow::Error| {
+                log::error!("Input processing failed: {error:#}");
+                match callback_error.lock() {
+                    Ok(mut slot) => *slot = Some(format!("Input processing failed: {error:#}")),
+                    Err(poisoned) => {
+                        *poisoned.into_inner() = Some(format!("Input processing failed: {error:#}"))
                     }
-                };
-                match event {
+                }
+                elwt.exit();
+            };
+            let handle_input = |input| {
+                if let Err(error) = callback_scene.borrow().consume_input(input) {
+                    report_input_error(error);
+                }
+            };
+            match event {
+                Event::AboutToWait => window.request_redraw(),
+                Event::DeviceEvent {
+                    event: DeviceEvent::MouseMotion { delta },
+                    ..
+                } => {
+                    let uses_raw = callback_scene.borrow().uses_raw_mouse_motion();
+                    if uses_raw {
+                        handle_input(crate::input::RawInput::MouseMotion(glam::Vec2::new(
+                            delta.0 as f32,
+                            delta.1 as f32,
+                        )));
+                    }
+                }
+                Event::WindowEvent { event, .. } => match event {
                     WindowEvent::RedrawRequested if !elwt.exiting() => {
                         let size = window.inner_size();
                         if size.width == 0 || size.height == 0 {
@@ -252,10 +267,13 @@ impl RenderLoop {
                         });
                     }
                     WindowEvent::CursorMoved { position, .. } => {
-                        handle_input(crate::input::RawInput::CursorMoved(glam::Vec2::new(
-                            position.x as f32,
-                            position.y as f32,
-                        )));
+                        let uses_raw = callback_scene.borrow().uses_raw_mouse_motion();
+                        if !uses_raw {
+                            handle_input(crate::input::RawInput::CursorMoved(glam::Vec2::new(
+                                position.x as f32,
+                                position.y as f32,
+                            )));
+                        }
                     }
                     WindowEvent::MouseWheel { delta, .. } => {
                         let amount = match delta {
@@ -266,13 +284,18 @@ impl RenderLoop {
                         };
                         handle_input(crate::input::RawInput::Scroll(amount));
                     }
-                    WindowEvent::Focused(false) => {
-                        handle_input(crate::input::RawInput::FocusLost);
+                    WindowEvent::Focused(focused) => {
+                        if let Err(error) = callback_scene.borrow().set_mouse_focus(focused) {
+                            report_input_error(error);
+                        }
+                        if !focused {
+                            handle_input(crate::input::RawInput::FocusLost);
+                        }
                     }
                     _ => {}
-                }
+                },
+                _ => {}
             }
-            _ => {}
         });
         let destroy_result = scene.borrow().destroy();
         if let Err(event_error) = event_result {

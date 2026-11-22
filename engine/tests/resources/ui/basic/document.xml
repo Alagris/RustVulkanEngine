@@ -1,0 +1,5 @@
+<Canvas id="root">
+  <Label id="title" class="text">Hello</Label>
+  <Button id="ok" class="action text" name="confirm"/>
+  <Image id="icon"/>
+</Canvas>

@@ -1,0 +1,3 @@
+* { foreground: white; }
+Label:hover { foreground: yellow; }
+Image[src="icon.png"] { top: 2px; }

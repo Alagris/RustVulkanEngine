@@ -1,0 +1,13 @@
+sheets: [rules.css]
+scenarios:
+  - styles:
+      root: { foreground: white, background: black }
+      button: { foreground: white, background: black, text-align: left }
+      label: { foreground: white, background: black }
+  - states:
+      root: [hover]
+      button: [hover, active, focus]
+    styles:
+      root: { foreground: white, background: black }
+      button: { foreground: red, background: orange, font-size: 20px }
+      label: { foreground: white, background: black }

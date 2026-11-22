@@ -44,10 +44,7 @@ impl Component for ProceduralMesh {
         _scene: &Scene,
         _game_object: &GameObject,
     ) -> Result<crate::ecs::Features> {
-        Ok(crate::ecs::Features {
-            updatable: true,
-            ..Default::default()
-        })
+        Ok(crate::ecs::UPDATE)
     }
 
     fn update(

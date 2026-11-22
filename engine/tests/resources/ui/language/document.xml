@@ -1,0 +1,5 @@
+<Canvas id="root" xml:lang="en-GB" dir="rtl">
+  <Label id="english"/>
+  <Stack id="child" xml:lang="fr" dir="ltr"><Label id="french"/></Stack>
+  <Label id="none" lang=""/>
+</Canvas>

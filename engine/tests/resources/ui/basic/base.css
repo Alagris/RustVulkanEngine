@@ -1,0 +1,5 @@
+* { foreground: white; }
+.text { font-size: 16px; }
+Canvas > Button { left: 10px; right: 5%; background: blue; }
+#ok { foreground: yellow; }
+Image { top: 0px; bottom: 20%; }

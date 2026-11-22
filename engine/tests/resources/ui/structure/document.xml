@@ -1,0 +1,6 @@
+<Stack id="root">
+  <Label id="first" class="item"/>
+  <Label id="second" class="item special" name="primary"/>
+  <Button id="third" class="item"/>
+  <Canvas id="nested"><Label id="inside" class="item"/></Canvas>
+</Stack>

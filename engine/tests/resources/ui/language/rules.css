@@ -1,0 +1,6 @@
+:lang(en) { foreground: red; }
+:lang(fr, de) { foreground: blue; }
+:dir(rtl) { text-align: right; }
+:dir(ltr) { text-align: left; }
+:lang(*) { background: green; }
+:lang("*-GB") { font-size: 11px; }

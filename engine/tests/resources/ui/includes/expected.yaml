@@ -1,0 +1,7 @@
+sheets: [one.css, two.css]
+scenarios:
+  - styles:
+      root: {}
+      instance: {}
+      inside: { foreground: green, background: black, font-size: 18px }
+      last: { text-align: center }
