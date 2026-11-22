@@ -14,6 +14,14 @@ render_buffers:
     height: 2048
     format: d32_float
     shadow_cascades: 4
+postprocessing:
+  - type: blur
+    radius: 1.5
+  - type: tone_mapping
+    exposure: 1.0
+  - type: fxaa
+    edge_threshold: 0.125
+    min_edge_threshold: 0.0312
 passes:
   - name: ForwardOpaque
     material: cube

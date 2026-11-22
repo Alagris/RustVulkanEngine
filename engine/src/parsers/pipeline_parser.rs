@@ -1,8 +1,8 @@
 use crate::parsers::hlsl_preprocessor;
 use crate::parsers::material_parser;
 use crate::render_pipeline::{
-    BufferSettings, ColorFormat, DepthFormat, PresentMode, RenderBufferSettings, RenderPass,
-    RenderPipeline, ShaderPassMetadata, SwapchainSettings,
+    BufferSettings, ColorFormat, DepthFormat, PostProcessPass, PresentMode, RenderBufferSettings,
+    RenderPass, RenderPipeline, ShaderPassMetadata, SwapchainSettings,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
@@ -17,7 +17,24 @@ struct PipelineFile {
     swapchain: SwapchainFile,
     #[serde(default)]
     render_buffers: RenderBuffersFile,
+    #[serde(default)]
+    postprocessing: Vec<PostProcessSettings>,
     passes: Vec<PassSettings>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum PostProcessSettings {
+    Blur {
+        radius: Option<f32>,
+    },
+    ToneMapping {
+        exposure: Option<f32>,
+    },
+    Fxaa {
+        edge_threshold: Option<f32>,
+        min_edge_threshold: Option<f32>,
+    },
 }
 
 #[derive(Deserialize)]
@@ -173,6 +190,50 @@ impl RenderPipeline {
             },
             shadow_cascades: config.render_buffers.shadow.shadow_cascades,
         };
+        let mut post_processing = Vec::new();
+        for settings in config.postprocessing {
+            match settings {
+                PostProcessSettings::Blur { radius } => {
+                    let radius = radius.unwrap_or(2.0);
+                    if !radius.is_finite() || radius <= 0.0 {
+                        bail!("postprocessing blur radius must be finite and greater than zero");
+                    }
+                    post_processing.push(PostProcessPass::BlurHorizontal { radius });
+                    post_processing.push(PostProcessPass::BlurVertical { radius });
+                }
+                PostProcessSettings::ToneMapping { exposure } => {
+                    let exposure = exposure.unwrap_or(1.0);
+                    if !exposure.is_finite() || exposure <= 0.0 {
+                        bail!(
+                            "postprocessing tone_mapping exposure must be finite and greater than zero"
+                        );
+                    }
+                    post_processing.push(PostProcessPass::ToneMapping { exposure });
+                }
+                PostProcessSettings::Fxaa {
+                    edge_threshold,
+                    min_edge_threshold,
+                } => {
+                    let edge_threshold = edge_threshold.unwrap_or(0.125);
+                    let min_edge_threshold = min_edge_threshold.unwrap_or(0.0312);
+                    if !edge_threshold.is_finite() || !(0.0..=1.0).contains(&edge_threshold) {
+                        bail!(
+                            "postprocessing fxaa edge_threshold must be finite and between zero and one"
+                        );
+                    }
+                    if !min_edge_threshold.is_finite() || !(0.0..=1.0).contains(&min_edge_threshold)
+                    {
+                        bail!(
+                            "postprocessing fxaa min_edge_threshold must be finite and between zero and one"
+                        );
+                    }
+                    post_processing.push(PostProcessPass::Fxaa {
+                        edge_threshold,
+                        min_edge_threshold,
+                    });
+                }
+            }
+        }
 
         let mut names = HashSet::new();
         let mut passes = Vec::with_capacity(config.passes.len());
@@ -254,6 +315,7 @@ impl RenderPipeline {
         Ok(Self {
             name: config.pipeline.name,
             passes,
+            post_processing,
             swapchain,
             render_buffers,
             output_dir: base_dir.join("compiled_shaders"),
