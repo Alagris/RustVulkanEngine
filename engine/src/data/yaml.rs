@@ -43,6 +43,10 @@ fn merge_sequences(mut base: Vec<Value>, patch: Vec<Value>) -> Result<Vec<Value>
         return Ok(patch);
     }
 
+    assert!(
+        base_ids && patch_ids,
+        "id-keyed merging requires both sequences to be fully id-keyed"
+    );
     for mut item in patch {
         let id = item_id(&item)?.to_owned();
         let remove = item
@@ -77,6 +81,14 @@ fn merge_sequences(mut base: Vec<Value>, patch: Vec<Value>) -> Result<Vec<Value>
             base.push(item);
         }
     }
+    debug_assert!(
+        sequence_ids(&base).is_ok_and(|ids| ids) || base.is_empty(),
+        "merged id-keyed sequence must keep unique non-empty ids"
+    );
+    debug_assert!(
+        !base.iter().any(is_removal_marker),
+        "merged sequence must not retain removal markers"
+    );
     Ok(base)
 }
 
@@ -105,4 +117,142 @@ fn item_id(value: &Value) -> Result<&str> {
 
 fn is_removal_marker(value: &Value) -> bool {
     value.get("remove").and_then(Value::as_bool) == Some(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn yaml(source: &str) -> Value {
+        serde_yaml::from_str(source).unwrap()
+    }
+
+    #[test]
+    fn merges_nested_mappings_recursively_and_replaces_scalars() {
+        let merged = merge_values(
+            yaml("name: Base\ntransform:\n  translation: [0, 0, 0]\n  scale: [1, 1, 1]\n"),
+            yaml("name: Child\ntransform:\n  translation: [5, 0, 0]\n"),
+        )
+        .unwrap();
+        assert_eq!(merged["name"].as_str(), Some("Child"));
+        assert_eq!(merged["transform"]["translation"][0].as_i64(), Some(5));
+        assert_eq!(
+            merged["transform"]["scale"][1].as_i64(),
+            Some(1),
+            "unpatched nested keys must be inherited"
+        );
+    }
+
+    #[test]
+    fn patch_replaces_values_of_different_kinds() {
+        assert_eq!(
+            merge_values(yaml("[1, 2]"), yaml("value: 3")).unwrap(),
+            yaml("value: 3")
+        );
+        assert_eq!(merge_values(yaml("scalar"), Value::Null).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn non_id_sequences_are_replaced_not_merged() {
+        let merged = merge_values(yaml("items: [1, 2, 3]"), yaml("items: [4]")).unwrap();
+        assert_eq!(merged["items"], yaml("[4]"));
+        let merged = merge_values(yaml("items: [1, 2]"), yaml("items: []")).unwrap();
+        assert_eq!(merged["items"], yaml("[]"));
+    }
+
+    #[test]
+    fn id_keyed_sequences_merge_append_and_remove_entries() {
+        let merged = merge_values(
+            yaml("children:\n  - id: a\n    name: First\n  - id: b\n    name: Second\n"),
+            yaml(
+                "children:\n  - id: a\n    name: Patched\n  - id: b\n    remove: true\n  - id: c\n    name: Added\n",
+            ),
+        )
+        .unwrap();
+        let children = merged["children"].as_sequence().unwrap();
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0]["name"].as_str(), Some("Patched"));
+        assert_eq!(children[1]["id"].as_str(), Some("c"));
+        assert!(
+            children.iter().all(|child| child.get("remove").is_none()),
+            "removal markers must not leak into merged output"
+        );
+    }
+
+    #[test]
+    fn rejects_removal_of_unknown_inherited_entries() {
+        let error = merge_values(
+            yaml("children:\n  - id: a\n"),
+            yaml("children:\n  - id: missing\n    remove: true\n"),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot remove unknown inherited entry 'missing'")
+        );
+    }
+
+    #[test]
+    fn rejects_removal_markers_without_id_keyed_entries() {
+        for (base, patch) in [
+            ("items: []", "items:\n  - remove: true\n"),
+            ("items: [1]", "items:\n  - remove: true\n"),
+        ] {
+            let error = merge_values(yaml(base), yaml(patch)).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("sequence removal entries require id-keyed inherited entries"),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_empty_and_non_boolean_sequence_metadata() {
+        let error = merge_values(
+            yaml("items:\n  - id: a\n  - id: a\n"),
+            yaml("items:\n  - id: a\n"),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("id-keyed sequence contains duplicate entry identifiers")
+        );
+
+        let error = merge_values(
+            yaml("items:\n  - id: a\n  - name: missing-id\n"),
+            yaml("items:\n  - id: a\n"),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("id-keyed sequence entries must have a non-empty string id")
+        );
+
+        let error = merge_values(
+            yaml("items:\n  - id: a\n"),
+            yaml("items:\n  - id: \"  \"\n"),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("id-keyed sequence entries must have a non-empty string id")
+        );
+
+        let error = merge_values(
+            yaml("items:\n  - id: a\n"),
+            yaml("items:\n  - id: a\n    remove: \"yes\"\n"),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("sequence remove markers must be booleans")
+        );
+    }
 }

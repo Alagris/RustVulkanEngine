@@ -1,0 +1,5 @@
+root:
+  name: TwoCameras
+  components:
+    - type: Camera
+    - type: Camera

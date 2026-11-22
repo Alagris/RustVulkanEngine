@@ -1,0 +1,5 @@
+root:
+  name: Other
+  children:
+    - prefab: deep
+      name: NestedInstance

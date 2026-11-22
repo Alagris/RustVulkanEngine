@@ -71,6 +71,7 @@ pub(crate) fn load_prefab_path(
         );
     }
     stack.push(path.clone());
+    let depth_before = stack.len();
     let result = (|| {
         let mut document = read_yaml(&path)?;
         let mapping = document
@@ -127,6 +128,17 @@ pub(crate) fn load_prefab_path(
         })?;
         Ok(root)
     })();
+    // Invariant: nested expansion must leave the resolution stack balanced.
+    assert_eq!(
+        stack.len(),
+        depth_before,
+        "prefab resolution stack must be balanced after expansion"
+    );
+    assert_eq!(
+        stack.last(),
+        Some(&path),
+        "prefab resolution stack top must be the prefab being resolved"
+    );
     stack.pop();
     result
 }
@@ -156,6 +168,11 @@ fn expand_game_object(
     } else {
         expand_children(mapping, assets, stack)?;
     }
+    // Postcondition: expansion must consume every prefab reference in this object.
+    debug_assert!(
+        object.get("prefab").is_none(),
+        "expanded game objects must not retain prefab references"
+    );
     Ok(())
 }
 

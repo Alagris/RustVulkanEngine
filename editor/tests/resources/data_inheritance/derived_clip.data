@@ -1,0 +1,4 @@
+type: AnimationClip
+name: DerivedClip
+parent: BaseClip
+data: {}

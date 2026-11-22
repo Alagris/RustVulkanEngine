@@ -1,0 +1,5 @@
+root:
+  name: Editor
+  children:
+    - prefab: camera_rig
+      name: EditorCamera

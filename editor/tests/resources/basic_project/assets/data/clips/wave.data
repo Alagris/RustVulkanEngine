@@ -1,0 +1,8 @@
+type: AnimationClip
+name: Wave
+data:
+  triggers:
+    - time: 0.5
+      trigger: wave_start
+    - time: 1.5
+      trigger: wave_end

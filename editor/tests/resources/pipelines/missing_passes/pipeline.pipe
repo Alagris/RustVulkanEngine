@@ -1,0 +1,4 @@
+pipeline:
+  name: NoPasses
+swapchain:
+  image_count: 2

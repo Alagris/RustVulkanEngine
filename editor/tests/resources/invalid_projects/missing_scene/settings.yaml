@@ -1,0 +1,3 @@
+pipeline: pipeline.pipe
+default_scene: ghost.scene
+editor_scene: ghost.scene

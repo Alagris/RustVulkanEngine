@@ -1,0 +1,20 @@
+deltaTime: 0.0
+timeSinceStart: 0.0
+root:
+  name: Main
+  transform:
+    translation: [0.0, 0.0, 0.0]
+    rotation: [0.0, 0.0, 0.0, 1.0]
+    scale: [1.0, 1.0, 1.0]
+  components:
+    - type: DirectionalLight
+      data:
+        direction: [-0.4, -1.0, -0.5]
+        color: [1.0, 0.92, 0.8]
+        intensity: 1.0
+  children:
+    - prefab: camera_rig
+    - prefab: crate
+      name: PlacedCrate
+      transform:
+        translation: [2.0, 0.0, 0.0]

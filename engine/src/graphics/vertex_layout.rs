@@ -69,3 +69,108 @@ pub(crate) fn validate_input_layout(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render_pipeline::ShaderInputFormat;
+
+    fn attribute(location: u32, format: ShaderInputFormat, offset: u32) -> ShaderInputAttribute {
+        ShaderInputAttribute {
+            location,
+            format,
+            offset,
+        }
+    }
+
+    #[test]
+    fn accepts_attributes_that_exactly_fill_the_stride() {
+        let layout = VertexLayout::new(
+            28,
+            vec![
+                attribute(0, ShaderInputFormat::Float32x3, 0),
+                attribute(1, ShaderInputFormat::Float32x4, 12),
+            ],
+        )
+        .unwrap();
+        assert_eq!(layout.stride, 28);
+        assert_eq!(layout.attributes.len(), 2);
+    }
+
+    #[test]
+    fn rejects_zero_stride_and_empty_attributes() {
+        let error = VertexLayout::new(0, vec![attribute(0, ShaderInputFormat::Float32, 0)])
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("positive stride and at least one attribute")
+        );
+        let error = VertexLayout::new(16, Vec::new()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("positive stride and at least one attribute")
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_locations_overflow_and_out_of_stride_attributes() {
+        let error = VertexLayout::new(
+            32,
+            vec![
+                attribute(0, ShaderInputFormat::Float32x3, 0),
+                attribute(0, ShaderInputFormat::Float32x3, 12),
+            ],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("repeats shader location 0"));
+
+        let error = VertexLayout::new(
+            32,
+            vec![attribute(0, ShaderInputFormat::Float32x4, u32::MAX - 4)],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("buffer attribute range overflow"));
+
+        let error = VertexLayout::new(8, vec![attribute(0, ShaderInputFormat::Float32x3, 0)])
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("extends beyond its stride")
+        );
+    }
+
+    #[test]
+    fn shader_input_validation_requires_matching_location_format_and_offset() {
+        let layout = VertexLayout::new(
+            24,
+            vec![
+                attribute(0, ShaderInputFormat::Float32x3, 0),
+                attribute(1, ShaderInputFormat::Float32x3, 12),
+            ],
+        )
+        .unwrap();
+
+        let matching = ShaderInputLayout {
+            stride: 24,
+            attributes: vec![attribute(1, ShaderInputFormat::Float32x3, 12)],
+        };
+        assert!(layout.validate_shader_inputs(&matching).is_ok());
+
+        let missing = ShaderInputLayout {
+            stride: 24,
+            attributes: vec![attribute(2, ShaderInputFormat::Float32x3, 0)],
+        };
+        let error = layout.validate_shader_inputs(&missing).unwrap_err();
+        assert!(error.to_string().contains("missing shader location 2"));
+
+        let mismatched = ShaderInputLayout {
+            stride: 24,
+            attributes: vec![attribute(1, ShaderInputFormat::Float32x4, 12)],
+        };
+        let error = layout.validate_shader_inputs(&mismatched).unwrap_err();
+        assert!(error.to_string().contains("location 1 expects"));
+    }
+}

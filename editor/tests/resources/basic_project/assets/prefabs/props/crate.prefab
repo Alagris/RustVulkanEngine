@@ -1,0 +1,9 @@
+root:
+  name: Crate
+  components:
+    - id: mesh
+      type: Mesh
+      data:
+        primitive: cube
+        material: Lit
+        size: [1.0, 1.0, 1.0]

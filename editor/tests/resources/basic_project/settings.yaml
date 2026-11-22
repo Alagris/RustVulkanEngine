@@ -1,0 +1,4 @@
+pipeline: pipeline.pipe
+default_scene: main.scene
+editor_scene: editor.scene
+input_asset: Controls

@@ -1,0 +1,8 @@
+type: AnimationClip
+name: BaseClip
+data:
+  triggers:
+    - time: 0.0
+      trigger: start
+    - time: 2.0
+      trigger: finish

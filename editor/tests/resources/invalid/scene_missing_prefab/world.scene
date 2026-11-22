@@ -1,0 +1,5 @@
+root:
+  name: World
+  children:
+    - prefab: ghost
+      name: MissingInstance

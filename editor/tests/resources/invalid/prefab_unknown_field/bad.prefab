@@ -1,0 +1,4 @@
+root:
+  name: Bad
+physics: enabled
+gravity: -9.81

@@ -1,0 +1,11 @@
+root:
+  name: BaseCar
+  transform:
+    translation: [0.0, 0.0, 0.0]
+  children:
+    - id: wheel
+      name: Wheel
+      transform:
+        translation: [1.0, 0.0, 0.0]
+    - id: spare_tire
+      name: SpareTire

@@ -1,0 +1,8 @@
+root:
+  name: Garage
+  children:
+    - prefab: sports_car
+      name: ParkedCar
+      transform:
+        translation: [10.0, 0.0, 0.0]
+    - prefab: showroom_car

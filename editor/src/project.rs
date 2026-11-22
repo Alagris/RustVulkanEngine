@@ -68,6 +68,17 @@ impl Project {
                 settings.editor_scene.display()
             );
         }
+        // Postcondition: resolution anchored every settings path inside the asset root.
+        for path in [
+            &settings.runtime.pipeline,
+            &settings.runtime.default_scene,
+            &settings.editor_scene,
+        ] {
+            assert!(
+                path.is_absolute(),
+                "resolved settings paths must be absolute"
+            );
+        }
         Ok(Self {
             root,
             assets,
@@ -200,12 +211,21 @@ fn resolve_setting_asset(
             asset_type.extension()
         );
     }
-    Ok(assets
+    let resolved = assets
         .resolve(&AssetRef {
             name: name.to_owned(),
             asset_type,
         })?
-        .to_path_buf())
+        .to_path_buf();
+    // Postcondition: the database only stores assets matching their extension.
+    assert!(
+        resolved
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case(asset_type.extension())),
+        "resolved settings asset must keep its declared extension"
+    );
+    Ok(resolved)
 }
 
 #[cfg(test)]

@@ -1,0 +1,12 @@
+pipeline:
+  name: BasicForward
+swapchain:
+  image_count: 3
+  present_mode: fifo
+  color_format: bgra8_srgb
+passes:
+  - name: Forward
+    material: lit
+    shader_pass: Main
+    color_target: swapchain
+    clear_color: [0.08, 0.1, 0.14, 1.0]

@@ -1,0 +1,5 @@
+type: Input
+name: LoopA
+parent: LoopB
+data:
+  keymaps: {}

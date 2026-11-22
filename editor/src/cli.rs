@@ -106,6 +106,11 @@ fn run_game(
         }
     }
 
+    // Postcondition: option parsing only accepts strictly positive frame limits.
+    assert!(
+        frame_limit.is_none_or(|frames| frames > 0),
+        "parsed frame limits must be positive"
+    );
     let runtime_settings = if release_mode {
         RuntimeSettings::load(&settings_path)?
     } else {

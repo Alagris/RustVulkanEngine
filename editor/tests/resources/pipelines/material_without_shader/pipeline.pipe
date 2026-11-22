@@ -1,0 +1,7 @@
+pipeline:
+  name: MaterialWithoutShader
+passes:
+  - name: Forward
+    material: broken
+    shader_pass: Main
+    color_target: swapchain

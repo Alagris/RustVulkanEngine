@@ -1,0 +1,13 @@
+parent: base_car
+root:
+  name: SportsCar
+  transform:
+    translation: [5.0, 0.0, 0.0]
+  children:
+    - id: wheel
+      transform:
+        translation: [2.0, 0.0, 0.0]
+    - id: spare_tire
+      remove: true
+    - id: spoiler
+      name: Spoiler

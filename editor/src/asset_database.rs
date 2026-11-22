@@ -136,6 +136,10 @@ impl AssetDatabase {
                 let canonical = path
                     .canonicalize()
                     .with_context(|| format!("Failed to resolve asset {}", path.display()))?;
+                assert!(
+                    canonical.is_absolute(),
+                    "canonicalized asset paths must be absolute"
+                );
                 if let Some(previous) = assets.get(&key) {
                     if asset_type == AssetType::Data {
                         log::warn!(
@@ -305,6 +309,10 @@ impl AssetDatabase {
                     destination.display()
                 )
             })?;
+            assert!(
+                destination.is_file(),
+                "packaged data asset must exist after copying"
+            );
         }
         Ok(PathBuf::from("data"))
     }
@@ -382,6 +390,11 @@ impl AssetDatabase {
         let resolved_pipeline = output.join("pipeline.pipe");
         fs::write(&resolved_pipeline, serde_yaml::to_string(&pipeline_value)?)
             .with_context(|| format!("Failed to write {}", resolved_pipeline.display()))?;
+        // Postcondition: callers hand this path to the runtime, so it must exist on disk.
+        assert!(
+            resolved_pipeline.is_file(),
+            "prepared development pipeline must exist"
+        );
         Ok(resolved_pipeline)
     }
 
@@ -518,7 +531,11 @@ impl AssetDatabase {
             )
         });
         match (package_result, cleanup_result) {
-            (Ok(path), Ok(())) => Ok(path),
+            (Ok(path), Ok(())) => {
+                // Postcondition: the returned pipeline is the entry point of the package.
+                assert!(path.is_file(), "packaged pipeline must exist");
+                Ok(path)
+            }
             (Err(error), _) => Err(error),
             (Ok(_), Err(error)) => Err(error),
         }
@@ -571,6 +588,18 @@ impl AssetDatabase {
         source: &Path,
         destination: &Path,
     ) -> Result<()> {
+        // Precondition: processors and fs::copy both require an existing source file.
+        assert!(
+            source.is_file(),
+            "asset processing requires an existing source file"
+        );
+        if !source.is_file() {
+            bail!(
+                "cannot process missing {:?} asset {}",
+                asset_type,
+                source.display()
+            );
+        }
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create {}", parent.display()))?;

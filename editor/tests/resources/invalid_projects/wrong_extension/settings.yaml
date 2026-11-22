@@ -1,0 +1,3 @@
+pipeline: main.scene
+default_scene: main.scene
+editor_scene: main.scene

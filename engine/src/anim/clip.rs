@@ -23,7 +23,7 @@ impl AnimationClip {
             .takes
             .get(take_index)
             .ok_or_else(|| anyhow!("FBX animation take index is invalid"))?;
-        if !take.start.is_finite() || !take.duration().is_finite() {
+        if !take.start.is_finite() || !take.duration().is_finite() || take.duration() < 0.0 {
             bail!("FBX animation take has invalid timing values");
         }
         Ok(Self {
@@ -45,6 +45,11 @@ impl AnimationClip {
         } else {
             self.start
         };
+        // Invariant: looping must keep the sample inside the take's time range.
+        assert!(
+            time >= self.start && time <= self.start + self.duration.max(0.0),
+            "sampled animation time must stay within the take range"
+        );
         let worlds = self
             .animation
             .worlds(&self.hierarchy, self.take_index, time);

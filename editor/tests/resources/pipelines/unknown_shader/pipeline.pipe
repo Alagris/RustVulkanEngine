@@ -1,0 +1,7 @@
+pipeline:
+  name: UnknownShader
+passes:
+  - name: Forward
+    material: ghost_shader
+    shader_pass: Main
+    color_target: swapchain

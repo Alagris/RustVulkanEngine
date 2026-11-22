@@ -346,3 +346,32 @@ point that supplies its project settings path:
 cargo run -p game -- --frames 10
 cargo run -p editor -- run --settings game\settings.yaml --compile-shaders
 ```
+
+## Testing
+
+Run the engine and editor suites from the repository root:
+
+```powershell
+cargo test -p engine -p editor
+```
+
+The editor exposes a reusable test framework in `editor::testing` that points
+the asset database and project loader at any folder on disk. `AssetDir::open`
+uses an existing directory as the asset root, `AssetDir::fixture` loads a
+checked-in folder from `editor/tests/resources`, `AssetDir::temp` creates a
+self-cleaning scratch directory, and `AssetDir::temp_copy_of_fixture` clones a
+fixture so tests can mutate it. `ProjectDir` provides the same entry points
+for whole projects (a `settings.yaml` next to an `assets` directory), and
+`scan_error_at`/`project_error_at` capture full error chains for negative
+tests.
+
+`editor/tests/resources` contains spoofed asset folders exercised by
+`editor/tests/fixtures.rs`: a complete project with a pipeline, materials,
+shaders, scenes, prefabs, and data assets (`basic_project`), prefab
+inheritance with id-keyed child merging and removal (`prefab_inheritance`),
+deeply nested asset roots (`deep_nesting`), data asset parent chains
+(`data_inheritance`), and a set of intentionally broken configurations under
+`invalid`, `pipelines`, and `invalid_projects` that assert the exact error
+messages produced for cyclic prefabs, duplicate assets, malformed scenes,
+unregistered data asset types, missing materials/shaders, and invalid project
+settings.

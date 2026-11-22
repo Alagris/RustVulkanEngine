@@ -277,7 +277,11 @@ fn resolve_document(
     } else {
         document.data.clone()
     };
-    resolving.remove(key);
+    let was_resolving = resolving.remove(key);
+    assert!(
+        was_resolving,
+        "resolution bookkeeping must contain every in-flight data asset"
+    );
     resolved.insert(key.clone(), value.clone());
     Ok(value)
 }
@@ -414,6 +418,118 @@ mod tests {
         assert_eq!(
             asset.with(|asset| asset.serialize_data().unwrap()),
             Some(serde_yaml::from_str("value: custom:original").unwrap())
+        );
+    }
+
+    fn error_of(documents: Vec<(String, Value, PathBuf)>) -> String {
+        match DataAssetDatabase::from_documents(documents) {
+            Ok(_) => panic!("expected the document set to be rejected"),
+            Err(error) => format!("{error:#}"),
+        }
+    }
+
+    #[test]
+    fn rejects_unregistered_asset_types() {
+        let error = error_of(vec![document(
+            "type: NoSuchAssetType\nname: broken\ndata: {}\n",
+            "broken.data",
+        )]);
+        assert!(
+            error.contains("unregistered data asset type 'NoSuchAssetType'"),
+            "unexpected error: {error}"
+        );
+        assert!(error.contains("broken.data"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn rejects_inheritance_cycles_and_missing_parents() {
+        let error = error_of(vec![
+            document("type: TestAsset\nname: A\nparent: B\ndata: {}\n", "a.data"),
+            document("type: TestAsset\nname: B\nparent: A\ndata: {}\n", "b.data"),
+        ]);
+        assert!(
+            error.contains("data asset inheritance cycle detected"),
+            "unexpected error: {error}"
+        );
+
+        let error = error_of(vec![document(
+            "type: TestAsset\nname: Orphan\nparent: Ghost\ndata: { value: v }\n",
+            "orphan.data",
+        )]);
+        assert!(
+            error.contains("parent data asset 'Ghost' was not found"),
+            "unexpected error: {error}"
+        );
+
+        let error = error_of(vec![document(
+            "type: TestAsset\nname: SelfParent\nparent: SelfParent\ndata: { value: v }\n",
+            "self.data",
+        )]);
+        assert!(
+            error.contains("data asset inheritance cycle detected at 'SelfParent'"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_documents() {
+        let error = error_of(vec![document("- not\n- a\n- mapping\n", "list.data")]);
+        assert!(
+            error.contains("data asset root must be a mapping"),
+            "unexpected error: {error}"
+        );
+
+        let error = error_of(vec![document("name: untyped\ndata: {}\n", "untyped.data")]);
+        assert!(
+            error.contains("data asset type is required"),
+            "unexpected error: {error}"
+        );
+
+        let error = error_of(vec![document(
+            "type: TestAsset\nname: \"  \"\ndata: {}\n",
+            "blank.data",
+        )]);
+        assert!(
+            error.contains("data asset field 'name' must be a non-empty string"),
+            "unexpected error: {error}"
+        );
+
+        let error = error_of(vec![document(
+            "type: TestAsset\nname: badparent\nparent: [list]\ndata: {}\n",
+            "badparent.data",
+        )]);
+        assert!(
+            error.contains("data asset parent must be a name"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn missing_data_block_uses_remaining_fields_as_data() {
+        let database = DataAssetDatabase::from_documents(vec![document(
+            "type: TestAsset\nname: inline\nvalue: inline-data\n",
+            "inline.data",
+        )])
+        .unwrap();
+        assert_eq!(
+            database
+                .get::<TestAsset>("inline")
+                .unwrap()
+                .with(|asset| asset.value.clone()),
+            Some("inline-data".to_owned())
+        );
+    }
+
+    #[test]
+    fn load_dir_rejects_missing_directories() {
+        let missing = std::env::temp_dir().join("engine-data-assets-do-not-exist");
+        let error = match DataAssetDatabase::load_dir(&missing) {
+            Ok(_) => panic!("expected the missing directory to be rejected"),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(
+            error.contains("data asset directory does not exist"),
+            "unexpected error: {error}"
         );
     }
 }

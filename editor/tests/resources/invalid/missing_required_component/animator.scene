@@ -1,0 +1,4 @@
+root:
+  name: LonelyAnimator
+  components:
+    - type: Animator

@@ -15,7 +15,7 @@ This way you still have a clean fallback in production environment in case if th
 So for example, in a bubble sort:
 
 ```rust
-fn bubble_sort(arr: * mut [i32]) -> Result<(), &'static str> {
+fn bubble_sort(arr: * mut i32) -> Result<(), &'static str> {
     assert!(!arr.is_null(), "array pointer is null");// this is a precondition
     if arr.is_null() {
         return Err("array pointer is null"); // this should never happen but we handle it gracefully anyway
