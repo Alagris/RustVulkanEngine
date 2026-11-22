@@ -1,47 +1,16 @@
 use crate::ecs::Component;
-use crate::ecs::component::{ComponentRegistry, component_ref};
-use crate::ecs::game_object::{GameObject, GameObjectWeak, TransformDefinition};
+use crate::ecs::component::{ComponentRegistry, Unique, component_ref};
+use crate::ecs::game_object::GameObject;
+use crate::ecs::game_object_serde::GameObjectDefinition;
+use crate::ecs::scene_serde::SceneDefinition;
 use crate::graphics::Graphics;
 use anyhow::{Context, Result, anyhow, bail};
 use cgmath::{Matrix4, SquareMatrix};
-use serde::Deserialize;
 use std::any::TypeId;
-use std::cell::{Cell, Ref, RefCell};
+use std::cell::{Cell, RefCell};
 use std::fs;
 use std::path::Path;
 use std::rc::{Rc, Weak};
-
-#[derive(Deserialize)]
-struct SceneDefinition {
-    root: GameObjectDefinition,
-    #[serde(default, rename = "deltaTime")]
-    delta_time: f32,
-    #[serde(default, rename = "timeSinceStart")]
-    time_since_start: f32,
-}
-
-#[derive(Deserialize)]
-struct GameObjectDefinition {
-    name: String,
-    #[serde(default)]
-    transform: TransformDefinition,
-    #[serde(default)]
-    components: Vec<ComponentDefinition>,
-    #[serde(default)]
-    children: Vec<GameObjectDefinition>,
-}
-
-#[derive(Deserialize)]
-struct ComponentDefinition {
-    #[serde(rename = "type")]
-    type_name: String,
-    #[serde(default = "empty_component_data")]
-    data: serde_yaml::Value,
-}
-
-fn empty_component_data() -> serde_yaml::Value {
-    serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
-}
 
 enum PendingMutation {
     Add {
@@ -59,9 +28,8 @@ enum PendingMutation {
 }
 
 pub struct Scene {
-    pub root: GameObject,
+    pub root: Unique<GameObject>,
     pub(crate) components: Vec<Weak<RefCell<dyn Component>>>,
-    pub(crate) game_objects: Vec<GameObjectWeak>,
     delta_time: Cell<f32>,
     time_since_start: Cell<f32>,
     initialized: Cell<bool>,
@@ -83,12 +51,9 @@ impl Scene {
         validate_timing(definition.delta_time, definition.time_since_start)?;
         let mut components = Vec::new();
         let root = build_game_object(definition.root, registry, &mut components)?;
-        let mut game_objects = Vec::new();
-        root.collect_weak_references(&mut game_objects);
         Ok(Self {
             root,
             components,
-            game_objects,
             delta_time: Cell::new(definition.delta_time),
             time_since_start: Cell::new(definition.time_since_start),
             initialized: Cell::new(false),
@@ -122,17 +87,9 @@ impl Scene {
             return Err(anyhow!("scene time overflowed its finite range"));
         }
         self.time_since_start.set(time_since_start);
-        let mut live_game_objects = 0;
-        for read_index in 0..self.game_objects.len() {
-            if self.game_objects[read_index].is_alive() {
-                if live_game_objects != read_index {
-                    self.game_objects[live_game_objects] = self.game_objects[read_index].clone();
-                }
-                live_game_objects += 1;
-            }
-        }
-        self.game_objects.truncate(live_game_objects);
-        self.root.update_world_transforms(Matrix4::identity());
+        self.root
+            .borrow()
+            .update_world_transforms(Matrix4::identity());
         let mut write_index = 0;
         let mut update_error = None;
         for read_index in 0..self.components.len() {
@@ -144,11 +101,11 @@ impl Scene {
                 let result = (|| {
                     let mut component = component.borrow_mut();
                     if component.started && component.updates {
-                        let owner = self
-                            .root
-                            .find_by_id(component.owner_id)
+                        let owner = component
+                            .owner
+                            .upgrade()
                             .ok_or_else(|| anyhow!("component owner no longer exists"))?;
-                        component.update(self, owner, graphics)?;
+                        component.update(self, &owner.borrow(), graphics)?;
                     }
                     Ok(())
                 })();
@@ -177,7 +134,7 @@ impl Scene {
         if self.destroyed.get() {
             bail!("cannot mutate a destroyed scene");
         }
-        if self.root.find_by_id(object_id).is_none() {
+        if self.root.borrow().find_by_id(object_id).is_none() {
             bail!("game object {object_id} does not belong to this scene");
         }
         self.pending_mutations
@@ -197,7 +154,7 @@ impl Scene {
         if self.destroyed.get() {
             bail!("cannot add a component to a destroyed scene");
         }
-        if self.root.find_by_id(owner.id()).is_none() {
+        if self.root.borrow().find_by_id(owner.id()).is_none() {
             bail!("game object {} does not belong to this scene", owner.id());
         }
         self.pending_mutations
@@ -213,7 +170,7 @@ impl Scene {
         if self.destroyed.get() {
             bail!("cannot remove a component from a destroyed scene");
         }
-        if self.root.find_by_id(owner.id()).is_none() {
+        if self.root.borrow().find_by_id(owner.id()).is_none() {
             bail!("game object {} does not belong to this scene", owner.id());
         }
         if !owner
@@ -253,15 +210,14 @@ impl Scene {
                         self.remove_component_now(owner_id, type_id)?;
                     }
                     PendingMutation::Mutate { owner_id, mutation } => {
-                        let object = self.root.find_by_id_mut(owner_id).ok_or_else(|| {
-                            anyhow!("deferred mutation target {owner_id} no longer exists")
-                        })?;
-                        mutation(object);
+                        let object =
+                            self.root.borrow().find_by_id_mut(owner_id).ok_or_else(|| {
+                                anyhow!("deferred mutation target {owner_id} no longer exists")
+                            })?;
+                        mutation(&mut object.borrow_mut());
                     }
                 }
             }
-            self.game_objects.clear();
-            self.root.collect_weak_references(&mut self.game_objects);
             self.initialize_components()?;
         }
     }
@@ -273,38 +229,38 @@ impl Scene {
     ) -> Result<()> {
         let owner = self
             .root
+            .borrow()
             .find_by_id_mut(owner_id)
             .ok_or_else(|| anyhow!("component owner {owner_id} no longer exists"))?;
         let mut component = component;
         component.owner_id = owner_id;
+        component.owner = Rc::downgrade(&owner);
         let component = component_ref(component);
         self.components.push(Rc::downgrade(&component));
-        owner.components.push(component);
+        owner.borrow_mut().components.push(component);
         Ok(())
     }
 
     fn remove_component_now(&mut self, owner_id: u64, type_id: TypeId) -> Result<()> {
         let owner = self
             .root
+            .borrow()
             .find_by_id(owner_id)
             .ok_or_else(|| anyhow!("component owner {owner_id} no longer exists"))?;
         let component_index = owner
+            .borrow()
             .components
             .iter()
             .position(|component| component.borrow().as_any().type_id() == type_id)
             .ok_or_else(|| anyhow!("requested component no longer exists on {owner_id}"))?;
-        let component = owner.components[component_index].clone();
+        let component = owner.borrow().components[component_index].clone();
         {
             let mut component = component.borrow_mut();
             if component.awoken {
-                component.destroy(self, owner)?;
+                component.destroy(self, &owner.borrow())?;
             }
         }
-        let owner = self
-            .root
-            .find_by_id_mut(owner_id)
-            .ok_or_else(|| anyhow!("component owner {owner_id} no longer exists"))?;
-        owner.components.remove(component_index);
+        owner.borrow_mut().components.remove(component_index);
         Ok(())
     }
 
@@ -317,13 +273,13 @@ impl Scene {
             if component.awoken {
                 continue;
             }
-            let owner = self
-                .root
-                .find_by_id(component.owner_id)
+            let owner = component
+                .owner
+                .upgrade()
                 .ok_or_else(|| anyhow!("component owner no longer exists"))?;
             component.awoken = true;
-            component.awake(self, owner);
-            component.updates = component.start(self, owner);
+            component.awake(self, &owner.borrow());
+            component.updates = component.start(self, &owner.borrow());
             component.started = true;
         }
         Ok(())
@@ -353,10 +309,7 @@ impl Scene {
     }
 
     pub fn game_object_count(&self) -> usize {
-        self.game_objects
-            .iter()
-            .filter(|object| object.is_alive())
-            .count()
+        count_game_objects(&self.root)
     }
 
     pub fn destroy(&self) -> Result<()> {
@@ -367,14 +320,17 @@ impl Scene {
         if self.destroyed.replace(true) {
             return Ok(());
         }
-        self.root.destroy_components(self)
+        self.root.borrow().destroy_components(self)
     }
 
-    pub fn find_game_object(&self, id: u64) -> Option<&GameObject> {
-        self.root.find_by_id(id)
+    pub fn find_game_object(&self, id: u64) -> Option<Unique<GameObject>> {
+        self.root.borrow().find_by_id(id)
     }
 
-    pub fn resolve_game_object(&self, object: &GameObjectWeak) -> Option<&GameObject> {
+    pub fn resolve_game_object(
+        &self,
+        object: &crate::ecs::GameObjectWeak,
+    ) -> Option<Unique<GameObject>> {
         if object.is_alive() {
             self.find_game_object(object.id())
         } else {
@@ -382,13 +338,22 @@ impl Scene {
         }
     }
 
-    pub fn find_component<T: crate::ecs::Component + 'static>(&self) -> Option<Ref<'_, T>> {
-        find_component(self, &self.root)
+    pub fn find_component<T: crate::ecs::Component + 'static>(
+        &self,
+    ) -> Option<crate::ecs::ComponentWeak<T>> {
+        self.components.iter().find_map(|component| {
+            let component = component.upgrade()?;
+            let borrowed = component.try_borrow().ok()?;
+            borrowed
+                .as_any()
+                .is::<T>()
+                .then(|| crate::ecs::ComponentWeak::new(Rc::downgrade(&component)))
+        })
     }
 }
 
 pub struct Prefab {
-    pub root: GameObject,
+    pub root: Unique<GameObject>,
 }
 
 impl Prefab {
@@ -424,11 +389,11 @@ fn build_game_object(
     definition: GameObjectDefinition,
     registry: &ComponentRegistry,
     components: &mut Vec<Weak<RefCell<dyn Component>>>,
-) -> Result<GameObject> {
+) -> Result<Unique<GameObject>> {
     if definition.name.trim().is_empty() {
         bail!("game object names must not be empty");
     }
-    let mut object = GameObject::new(
+    let object = GameObject::new(
         definition.name,
         definition.transform.to_transform()?,
         Vec::new(),
@@ -436,27 +401,27 @@ fn build_game_object(
     for component_definition in definition.components {
         let mut component =
             registry.create(&component_definition.type_name, &component_definition.data)?;
-        component.owner_id = object.id();
+        component.owner_id = object.borrow().id();
+        component.owner = Rc::downgrade(&object);
         let component = component_ref(component);
         components.push(Rc::downgrade(&component));
-        object.components.push(component);
+        object.borrow_mut().components.push(component);
     }
     for child in definition.children {
-        object.add_child(build_game_object(child, registry, components)?);
+        object
+            .borrow_mut()
+            .add_child(build_game_object(child, registry, components)?);
     }
     Ok(object)
 }
 
-fn find_component<'a, T: crate::ecs::Component + 'static>(
-    scene: &'a Scene,
-    object: &'a GameObject,
-) -> Option<Ref<'a, T>> {
-    object.get_component::<T>(scene).or_else(|| {
-        object
-            .children()
-            .iter()
-            .find_map(|child| find_component(scene, child))
-    })
+fn count_game_objects(object: &Unique<GameObject>) -> usize {
+    let object = object.borrow();
+    1 + object
+        .children()
+        .iter()
+        .map(count_game_objects)
+        .sum::<usize>()
 }
 
 #[cfg(test)]
@@ -470,13 +435,43 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    #[crate::ecs::component]
+    #[crate::ecs::component(
+        serialize_with = serialize_lifecycle_probe,
+        deserialize_with = deserialize_lifecycle_probe
+    )]
     #[derive(crate::ecs::Component)]
     struct LifecycleProbe {
         awakes: Rc<Cell<usize>>,
         starts: Rc<Cell<usize>>,
         updates: Rc<Cell<usize>>,
         update_enabled: bool,
+    }
+
+    struct LifecycleFactoryState {
+        awakes: Rc<Cell<usize>>,
+        starts: Rc<Cell<usize>>,
+        updates: Rc<Cell<usize>>,
+        update_enabled: bool,
+    }
+
+    fn deserialize_lifecycle_probe(
+        _data: &serde_yaml::Value,
+        context: Option<&dyn Any>,
+    ) -> Result<LifecycleProbe> {
+        let state = context
+            .and_then(|context| context.downcast_ref::<LifecycleFactoryState>())
+            .ok_or_else(|| anyhow!("LifecycleProbe requires test factory context"))?;
+        Ok(LifecycleProbe {
+            instance: ComponentInstance::default(),
+            awakes: Rc::clone(&state.awakes),
+            starts: Rc::clone(&state.starts),
+            updates: Rc::clone(&state.updates),
+            update_enabled: state.update_enabled,
+        })
+    }
+
+    fn serialize_lifecycle_probe(component: &LifecycleProbe) -> Result<serde_yaml::Value> {
+        Ok(serde_yaml::Value::Bool(component.update_enabled))
     }
 
     impl Component for LifecycleProbe {
@@ -504,6 +499,54 @@ mod tests {
         }
     }
 
+    #[crate::ecs::component(deserialize_with = deserialize_owner_probe)]
+    #[derive(crate::ecs::Component)]
+    struct OwnerProbe {
+        calls: Rc<RefCell<Vec<(&'static str, u64)>>>,
+    }
+
+    fn deserialize_owner_probe(
+        _data: &serde_yaml::Value,
+        context: Option<&dyn Any>,
+    ) -> Result<OwnerProbe> {
+        let calls = context
+            .and_then(|context| context.downcast_ref::<Rc<RefCell<Vec<(&'static str, u64)>>>>())
+            .ok_or_else(|| anyhow!("OwnerProbe requires test factory context"))?;
+        Ok(OwnerProbe {
+            instance: ComponentInstance::default(),
+            calls: Rc::clone(calls),
+        })
+    }
+
+    impl Component for OwnerProbe {
+        fn awake(&mut self, _scene: &Scene, game_object: &GameObject) {
+            self.calls.borrow_mut().push(("awake", game_object.id()));
+        }
+        fn start(&mut self, _scene: &Scene, game_object: &GameObject) -> bool {
+            self.calls.borrow_mut().push(("start", game_object.id()));
+            true
+        }
+        fn update(
+            &mut self,
+            _scene: &Scene,
+            game_object: &GameObject,
+            _graphics: &mut Graphics,
+        ) -> Result<()> {
+            self.calls.borrow_mut().push(("update", game_object.id()));
+            Ok(())
+        }
+        fn destroy(&mut self, _scene: &Scene, game_object: &GameObject) -> Result<()> {
+            self.calls.borrow_mut().push(("destroy", game_object.id()));
+            Ok(())
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+    }
+
     fn registry(
         update_enabled: bool,
     ) -> (
@@ -516,22 +559,12 @@ mod tests {
         let starts = Rc::new(Cell::new(0));
         let updates = Rc::new(Cell::new(0));
         let mut registry = ComponentRegistry::new();
-        registry
-            .register_typed::<LifecycleProbe>("Probe", {
-                let awakes = Rc::clone(&awakes);
-                let starts = Rc::clone(&starts);
-                let updates = Rc::clone(&updates);
-                move |_| {
-                    Ok(LifecycleProbe {
-                        instance: ComponentInstance::default(),
-                        awakes: Rc::clone(&awakes),
-                        starts: Rc::clone(&starts),
-                        updates: Rc::clone(&updates),
-                        update_enabled,
-                    })
-                }
-            })
-            .unwrap();
+        registry.set_context(LifecycleFactoryState {
+            awakes: Rc::clone(&awakes),
+            starts: Rc::clone(&starts),
+            updates: Rc::clone(&updates),
+            update_enabled,
+        });
         (registry, awakes, starts, updates)
     }
 
@@ -545,19 +578,33 @@ timeSinceStart: 3.5
 root:
   name: Root
   components:
-    - type: Probe
+    - type: LifecycleProbe
   children:
     - name: Child
       components:
-        - type: Probe
+        - type: LifecycleProbe
 "#,
             &registry,
         )
         .unwrap();
-        assert_eq!(scene.root.get_components::<LifecycleProbe>(&scene).len(), 1);
-        assert!(scene.root.get_component::<LifecycleProbe>(&scene).is_some());
         assert_eq!(
-            scene.root.children()[0]
+            scene
+                .root
+                .borrow()
+                .get_components::<LifecycleProbe>(&scene)
+                .len(),
+            1
+        );
+        assert!(
+            scene
+                .root
+                .borrow()
+                .get_component::<LifecycleProbe>(&scene)
+                .is_some()
+        );
+        assert_eq!(
+            scene.root.borrow().children()[0]
+                .borrow()
                 .get_components::<LifecycleProbe>(&scene)
                 .len(),
             1
@@ -576,7 +623,7 @@ root:
     fn non_updating_components_are_not_added_to_the_update_list() {
         let (registry, _, _, updates) = registry(false);
         let mut scene = Scene::from_yaml(
-            "root:\n  name: Root\n  components:\n    - type: Probe\n",
+            "root:\n  name: Root\n  components:\n    - type: LifecycleProbe\n",
             &registry,
         )
         .unwrap();
@@ -587,21 +634,48 @@ root:
     }
 
     #[test]
+    fn component_registry_generates_type_listing_and_custom_serde_hooks() {
+        let (registry, _, _, _) = registry(true);
+        let scene = Scene::from_yaml(
+            "root:\n  name: Root\n  components:\n    - type: LifecycleProbe\n",
+            &registry,
+        )
+        .unwrap();
+        let info = registry
+            .component_types()
+            .unwrap()
+            .into_iter()
+            .find(|component| component.type_name == "LifecycleProbe")
+            .unwrap();
+        assert!(info.can_deserialize);
+        assert!(info.can_serialize);
+        let root = scene.root.borrow();
+        let component = root
+            .get_component::<LifecycleProbe>(&scene)
+            .expect("component was created by its generated factory");
+        assert_eq!(
+            registry.serialize_component(&*component).unwrap(),
+            serde_yaml::Value::Bool(true)
+        );
+    }
+
+    #[test]
     fn typed_component_weak_handles_follow_component_lifetime() {
         let (registry, _, _, _) = registry(false);
         let mut scene = Scene::from_yaml(
-            "root:\n  name: Root\n  components:\n    - type: Camera\n    - type: Probe\n",
+            "root:\n  name: Root\n  components:\n    - type: Camera\n    - type: LifecycleProbe\n",
             &registry,
         )
         .unwrap();
         scene.initialize().unwrap();
         let camera = scene
             .root
+            .borrow()
             .get_component_weak::<crate::ecs::Camera>()
             .expect("camera component exists");
         assert!(camera.is_alive());
         scene
-            .remove_component::<crate::ecs::Camera>(&scene.root)
+            .remove_component::<crate::ecs::Camera>(&scene.root.borrow())
             .unwrap();
         scene.update(0.016, &mut Graphics::default()).unwrap();
         assert!(!camera.is_alive());
@@ -616,7 +690,7 @@ root:
         )
         .unwrap();
         scene.initialize().unwrap();
-        let target_id = scene.root.children()[0].id();
+        let target_id = scene.root.borrow().children()[0].borrow().id();
         scene
             .defer_game_object_mutation(target_id, |target| {
                 target
@@ -626,7 +700,7 @@ root:
             .unwrap();
         scene.update(0.016, &mut Graphics::default()).unwrap();
         let target = scene.find_game_object(target_id).unwrap();
-        assert_eq!(target.transform().w.x, 1.0);
+        assert_eq!(target.borrow().transform().w.x, 1.0);
     }
 
     #[test]
@@ -638,9 +712,9 @@ root:
         )
         .unwrap();
         scene.initialize().unwrap();
-        let child = scene.root.children()[0].weak_reference();
+        let child = scene.root.borrow().children()[0].borrow().weak_reference();
         let child_id = child.id();
-        let root_id = scene.root.id();
+        let root_id = scene.root.borrow().id();
         assert!(scene.resolve_game_object(&child).is_some());
         assert_eq!(scene.game_object_count(), 2);
 
@@ -654,7 +728,6 @@ root:
         assert!(!child.is_alive());
         assert!(scene.resolve_game_object(&child).is_none());
         assert_eq!(scene.game_object_count(), 1);
-        assert_eq!(scene.game_objects.len(), 1);
     }
 
     #[test]
@@ -664,7 +737,7 @@ root:
         assert!(
             scene
                 .add_component(
-                    &GameObject::empty("Outsider"),
+                    &GameObject::empty("Outsider").borrow(),
                     Box::new(Noop {
                         instance: ComponentInstance::default(),
                     }),
@@ -678,18 +751,19 @@ root:
         let (registry, awakes, starts, updates) = registry(true);
         let mut scene = Scene::from_yaml("root:\n  name: Root\n", &registry).unwrap();
         scene.initialize().unwrap();
-        let root = scene.find_game_object(scene.root.id()).unwrap();
-        root.add_component(
-            &scene,
-            Box::new(LifecycleProbe {
-                instance: ComponentInstance::default(),
-                awakes: Rc::clone(&awakes),
-                starts: Rc::clone(&starts),
-                updates: Rc::clone(&updates),
-                update_enabled: true,
-            }),
-        )
-        .unwrap();
+        let root = scene.find_game_object(scene.root.borrow().id()).unwrap();
+        root.borrow()
+            .add_component(
+                &scene,
+                Box::new(LifecycleProbe {
+                    instance: ComponentInstance::default(),
+                    awakes: Rc::clone(&awakes),
+                    starts: Rc::clone(&starts),
+                    updates: Rc::clone(&updates),
+                    update_enabled: true,
+                }),
+            )
+            .unwrap();
         scene.update(0.016, &mut Graphics::default()).unwrap();
         assert_eq!(awakes.get(), 1);
         assert_eq!(starts.get(), 1);
@@ -702,80 +776,55 @@ root:
     fn removing_components_releases_owner_and_prunes_dead_scene_references() {
         let (registry, _, _, _) = registry(false);
         let mut scene = Scene::from_yaml(
-            "root:\n  name: Root\n  components:\n    - type: Probe\n  children:\n    - name: Child\n      components:\n        - type: Probe\n",
+            "root:\n  name: Root\n  components:\n    - type: LifecycleProbe\n  children:\n    - name: Child\n      components:\n        - type: LifecycleProbe\n",
             &registry,
         )
         .unwrap();
         scene.initialize().unwrap();
-        let child_id = scene.root.children().first().unwrap().id();
+        let child_id = scene
+            .root
+            .borrow()
+            .children()
+            .first()
+            .unwrap()
+            .borrow()
+            .id();
         scene
-            .remove_component::<LifecycleProbe>(&scene.root)
+            .remove_component::<LifecycleProbe>(&scene.root.borrow())
             .unwrap();
         scene.update(0.016, &mut Graphics::default()).unwrap();
         let child = scene.find_game_object(child_id).unwrap();
         assert_eq!(scene.component_count(), 1);
-        assert_eq!(scene.root.components(), 0);
-        assert_eq!(child.components(), 1);
-        assert!(scene.root.get_component::<LifecycleProbe>(&scene).is_none());
-        assert!(child.get_component::<LifecycleProbe>(&scene).is_some());
+        assert_eq!(scene.root.borrow().components(), 0);
+        assert_eq!(child.borrow().components(), 1);
+        assert!(
+            scene
+                .root
+                .borrow()
+                .get_component::<LifecycleProbe>(&scene)
+                .is_none()
+        );
+        assert!(
+            child
+                .borrow()
+                .get_component::<LifecycleProbe>(&scene)
+                .is_some()
+        );
         scene.update(0.016, &mut Graphics::default()).unwrap();
         assert_eq!(scene.components.len(), 1);
     }
 
     #[test]
     fn lifecycle_callbacks_receive_the_owner_and_destroy_runs_once() {
-        #[crate::ecs::component]
-        #[derive(crate::ecs::Component)]
-        struct OwnerProbe {
-            calls: Rc<RefCell<Vec<(&'static str, u64)>>>,
-        }
-
-        impl Component for OwnerProbe {
-            fn awake(&mut self, _scene: &Scene, game_object: &GameObject) {
-                self.calls.borrow_mut().push(("awake", game_object.id()));
-            }
-            fn start(&mut self, _scene: &Scene, game_object: &GameObject) -> bool {
-                self.calls.borrow_mut().push(("start", game_object.id()));
-                true
-            }
-            fn update(
-                &mut self,
-                _scene: &Scene,
-                game_object: &GameObject,
-                _graphics: &mut Graphics,
-            ) -> Result<()> {
-                self.calls.borrow_mut().push(("update", game_object.id()));
-                Ok(())
-            }
-            fn destroy(&mut self, _scene: &Scene, game_object: &GameObject) -> Result<()> {
-                self.calls.borrow_mut().push(("destroy", game_object.id()));
-                Ok(())
-            }
-            fn as_any(&self) -> &dyn Any {
-                self
-            }
-            fn as_any_mut(&mut self) -> &mut dyn Any {
-                self
-            }
-        }
-
-        let calls = Rc::new(RefCell::new(Vec::new()));
+        let calls = Rc::new(RefCell::new(Vec::<(&'static str, u64)>::new()));
         let mut registry = ComponentRegistry::new();
-        let factory_calls = Rc::clone(&calls);
-        registry
-            .register_typed::<OwnerProbe>("OwnerProbe", move |_| {
-                Ok(OwnerProbe {
-                    instance: ComponentInstance::default(),
-                    calls: Rc::clone(&factory_calls),
-                })
-            })
-            .unwrap();
+        registry.set_context(Rc::clone(&calls));
         let mut scene = Scene::from_yaml(
             "root:\n  name: Root\n  components:\n    - type: OwnerProbe\n",
             &registry,
         )
         .unwrap();
-        let owner_id = scene.root.id();
+        let owner_id = scene.root.borrow().id();
         scene.initialize().unwrap();
         scene.update(0.016, &mut Graphics::default()).unwrap();
         scene.destroy().unwrap();
@@ -795,7 +844,7 @@ root:
     fn prefab_uses_the_same_root_object_yaml_shape() {
         let (registry, _, _, _) = registry(false);
         let prefab = Prefab::from_yaml("root:\n  name: Prefab\n", &registry).unwrap();
-        assert_eq!(prefab.root.name, "Prefab");
+        assert_eq!(prefab.root.borrow().name, "Prefab");
     }
 
     #[test]
@@ -822,9 +871,33 @@ root:
         assert!(
             scene
                 .root
+                .borrow()
                 .get_component::<crate::ecs::Camera>(&scene)
                 .is_some()
         );
+    }
+
+    #[test]
+    fn directional_light_is_auto_registered_with_unique_metadata() {
+        let registry = ComponentRegistry::new();
+        let scene = Scene::from_yaml(
+            "root:\n  name: Root\n  components:\n    - type: DirectionalLight\n      data:\n        direction: [0.0, -1.0, 0.0]\n        color: [0.8, 0.9, 1.0]\n        intensity: 2.0\n",
+            &registry,
+        )
+        .unwrap();
+        let root = scene.root.borrow();
+        let light = root
+            .get_component::<crate::ecs::DirectionalLight>(&scene)
+            .expect("generated component factory creates directional lights");
+        assert_eq!(light.intensity, 2.0);
+        assert!(light.uniform_values().is_ok());
+        let metadata = registry
+            .component_types()
+            .unwrap()
+            .into_iter()
+            .find(|component| component.type_name == "DirectionalLight")
+            .unwrap();
+        assert!(metadata.unique);
     }
 
     #[test]
@@ -835,7 +908,7 @@ root:
             &registry,
         )
         .unwrap();
-        assert_eq!(scene.root.components.len(), 2);
+        assert_eq!(scene.root.borrow().components.len(), 2);
     }
 
     #[crate::ecs::component]

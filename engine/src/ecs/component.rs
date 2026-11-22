@@ -3,16 +3,15 @@ use crate::graphics::Graphics;
 use anyhow::{Result, anyhow};
 use std::any::Any;
 use std::cell::{Ref, RefCell, RefMut};
-use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::rc::{Rc, Weak};
-use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct ComponentInstance {
     pub(crate) owner_id: u64,
+    pub(crate) owner: Weak<RefCell<GameObject>>,
     pub(crate) awoken: bool,
     pub(crate) started: bool,
     pub(crate) updates: bool,
@@ -24,19 +23,38 @@ pub trait ComponentMetadata {
     const UNIQUE: bool;
 }
 
-pub struct ComponentRuleRegistration {
+pub type ComponentFactory = fn(&serde_yaml::Value, Option<&dyn Any>) -> Result<Box<dyn Component>>;
+pub type ComponentSerializer = fn(&dyn Component) -> Result<serde_yaml::Value>;
+pub type Unique<T> = Rc<RefCell<T>>;
+
+pub struct ComponentRegistration {
     pub type_name: &'static str,
     pub required_components: &'static [&'static str],
     pub unique: bool,
+    pub factory: Option<ComponentFactory>,
+    pub serializer: Option<ComponentSerializer>,
+    pub is_type: fn(&dyn Component) -> bool,
 }
 
-inventory::collect!(ComponentRuleRegistration);
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComponentTypeInfo {
+    pub type_name: &'static str,
+    pub required_components: &'static [&'static str],
+    pub unique: bool,
+    pub can_deserialize: bool,
+    pub can_serialize: bool,
+}
+
+inventory::collect!(ComponentRegistration);
+pub use anyhow as anyhow_crate;
 pub use inventory;
+pub use serde_yaml;
 
 impl Default for ComponentInstance {
     fn default() -> Self {
         Self {
             owner_id: 0,
+            owner: Weak::new(),
             awoken: false,
             started: false,
             updates: false,
@@ -56,7 +74,7 @@ impl fmt::Debug for ComponentInstance {
     }
 }
 
-pub(crate) type UniqueRc<T> = Rc<RefCell<T>>;
+pub(crate) type UniqueRc<T> = Unique<T>;
 
 pub struct ComponentWeak<T: Component + 'static> {
     component: Weak<RefCell<dyn Component>>,
@@ -177,24 +195,13 @@ pub trait Component:
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
-type ComponentFactory = Arc<dyn Fn(&serde_yaml::Value) -> Result<Box<dyn Component>>>;
-
 pub struct ComponentRegistry {
-    factories: HashMap<String, ComponentFactory>,
+    context: Option<Rc<dyn Any>>,
 }
 
 impl Default for ComponentRegistry {
     fn default() -> Self {
-        let mut registry = Self {
-            factories: HashMap::new(),
-        };
-        registry
-            .register_typed::<crate::ecs::Camera>("Camera", |data| {
-                serde_yaml::from_value(data.clone())
-                    .map_err(|error| anyhow!("invalid Camera component data: {error}"))
-            })
-            .expect("built-in Camera component type is unique");
-        registry
+        Self { context: None }
     }
 }
 
@@ -203,47 +210,33 @@ impl ComponentRegistry {
         Self::default()
     }
 
-    pub fn register(
-        &mut self,
-        type_name: impl Into<String>,
-        factory: impl Fn(&serde_yaml::Value) -> Result<Box<dyn Component>> + 'static,
-    ) -> Result<()> {
-        let type_name = type_name.into();
-        if type_name.trim().is_empty() {
-            return Err(anyhow!("component type names must not be empty"));
-        }
-        if self.factories.contains_key(&type_name) {
-            return Err(anyhow!(
-                "component factory for '{}' was registered more than once",
-                type_name
-            ));
-        }
-        self.factories.insert(type_name, Arc::new(factory));
-        Ok(())
+    pub fn set_context<T: Any>(&mut self, context: T) {
+        self.context = Some(Rc::new(context));
     }
 
-    pub fn register_typed<T: Component + 'static>(
-        &mut self,
-        type_name: impl Into<String>,
-        factory: impl Fn(&serde_yaml::Value) -> Result<T> + 'static,
-    ) -> Result<()> {
-        let type_name = type_name.into();
-        if type_name.trim().is_empty() {
-            return Err(anyhow!("component type names must not be empty"));
+    pub fn component_types(&self) -> Result<Vec<ComponentTypeInfo>> {
+        let mut registrations = inventory::iter::<ComponentRegistration>
+            .into_iter()
+            .collect::<Vec<_>>();
+        registrations.sort_by_key(|registration| registration.type_name);
+        for pair in registrations.windows(2) {
+            if pair[0].type_name == pair[1].type_name {
+                return Err(anyhow!(
+                    "component type '{}' was registered more than once",
+                    pair[0].type_name
+                ));
+            }
         }
-        if self.factories.contains_key(&type_name) {
-            return Err(anyhow!(
-                "component factory for '{}' was registered more than once",
-                type_name
-            ));
-        }
-        self.factories.insert(
-            type_name,
-            Arc::new(move |data| {
-                factory(data).map(|component| Box::new(component) as Box<dyn Component>)
-            }),
-        );
-        Ok(())
+        Ok(registrations
+            .into_iter()
+            .map(|registration| ComponentTypeInfo {
+                type_name: registration.type_name,
+                required_components: registration.required_components,
+                unique: registration.unique,
+                can_deserialize: registration.factory.is_some(),
+                can_serialize: registration.serializer.is_some(),
+            })
+            .collect())
     }
 
     pub(crate) fn create(
@@ -251,11 +244,47 @@ impl ComponentRegistry {
         type_name: &str,
         data: &serde_yaml::Value,
     ) -> Result<Box<dyn Component>> {
-        let factory = self
-            .factories
-            .get(type_name)
+        let mut registrations = inventory::iter::<ComponentRegistration>
+            .into_iter()
+            .filter(|registration| registration.type_name == type_name);
+        let registration = registrations
+            .next()
             .ok_or_else(|| anyhow!("unregistered component type '{}'", type_name))?;
-        factory(data)
+        if registrations.next().is_some() {
+            return Err(anyhow!(
+                "component type '{}' was registered more than once",
+                type_name
+            ));
+        }
+        let factory = registration.factory.ok_or_else(|| {
+            anyhow!(
+                "component type '{}' has no deserializer; add `Deserialize` or a custom component deserializer",
+                type_name
+            )
+        })?;
+        factory(data, self.context.as_deref())
+    }
+
+    pub fn serialize_component(&self, component: &dyn Component) -> Result<serde_yaml::Value> {
+        let mut registrations = inventory::iter::<ComponentRegistration>
+            .into_iter()
+            .filter(|registration| (registration.is_type)(component));
+        let registration = registrations
+            .next()
+            .ok_or_else(|| anyhow!("component type has no generated registration"))?;
+        if registrations.next().is_some() {
+            return Err(anyhow!(
+                "component type '{}' was registered more than once",
+                registration.type_name
+            ));
+        }
+        let serializer = registration.serializer.ok_or_else(|| {
+            anyhow!(
+                "component type '{}' has no serializer; add `Serialize` or a custom component serializer",
+                registration.type_name
+            )
+        })?;
+        serializer(component)
     }
 }
 

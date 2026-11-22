@@ -17,7 +17,9 @@ pub struct Bone {
     pub pose_matrix: Mat4,
 }
 
-#[crate::ecs::component]
+#[crate::ecs::component(
+    deserialize_with = crate::render_loop::deserialize_skinned_mesh_component
+)]
 #[derive(crate::ecs::Component)]
 pub struct SkinnedMesh {
     pub name: String,

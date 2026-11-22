@@ -1,8 +1,14 @@
-use crate::render_pipeline::{CullMode, LexError, RenderQueue};
-use anyhow::{Context, Result, bail};
+use crate::parsers::material_lexer::{LexError, ShaderLexer, Token};
+use crate::render_pipeline::{
+    CullMode, RenderQueue, ShaderDefinition, ShaderInputLayout, ShaderPassMetadata,
+};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+lalrpop_util::lalrpop_mod!(shader_grammar);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaterialAsset {
@@ -88,4 +94,88 @@ fn unquote_material_string(value: String) -> String {
         }
     }
     decoded
+}
+
+pub(crate) fn parse_shader_definition(source: &str) -> Result<ShaderDefinition> {
+    let mut shader = shader_grammar::ShaderParser::new()
+        .parse(ShaderLexer::new(source))
+        .map_err(|error| anyhow!("{error}"))?;
+    let mut names = HashSet::new();
+    for pass in &mut shader.passes {
+        if !names.insert(&pass.name) {
+            bail!("shader pass names must be unique: '{}'", pass.name);
+        }
+        let (vertex_inputs, instance_inputs) =
+            crate::parsers::hlsl_parser::parse_input_layouts(&pass.hlsl)
+                .with_context(|| format!("Invalid input layout in shader pass '{}'", pass.name))?;
+        pass.vertex_inputs = vertex_inputs;
+        pass.instance_inputs = instance_inputs;
+    }
+    Ok(shader)
+}
+
+pub fn shader_asset_name(source: &str) -> Result<String> {
+    parse_shader_definition(source).map(|shader| shader.name)
+}
+
+pub(super) fn unquote(value: String) -> String {
+    let mut chars = value[1..value.len() - 1].chars();
+    let mut decoded = String::new();
+    while let Some(character) = chars.next() {
+        if character == '\\' {
+            let escaped = chars.next().expect("lexer validates quoted escapes");
+            decoded.push(match escaped {
+                '"' => '"',
+                '\\' => '\\',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                _ => unreachable!("lexer validates quoted escapes"),
+            });
+        } else {
+            decoded.push(character);
+        }
+    }
+    decoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_multiple_shader_passes_with_quoted_metadata() {
+        let source = r#"
+shader "Test" {
+    pass "Forward" {
+        face "back"
+        queue "opaque"
+        hlsl {
+            struct VertexInput { float3 position : POSITION; };
+            float4 VSMain(VertexInput input) : SV_Position { return 0; }
+            float4 PSMain() : SV_Target0 { return 1; }
+        }
+    }
+    pass "Shadow" {
+        face "front"
+        queue "transparent"
+        hlsl {
+            struct VertexInput { float3 position : POSITION; };
+            float4 VSMain(VertexInput input) : SV_Position { return 0; }
+            float4 PSMain() : SV_Target0 { return 1; }
+        }
+    }
+}
+"#;
+        let shader = parse_shader_definition(source).unwrap();
+        assert_eq!(shader.name, "Test");
+        assert_eq!(shader.passes.len(), 2);
+        assert_eq!(shader.passes[0].name, "Forward");
+        assert_eq!(shader.passes[0].cull, CullMode::Back);
+        assert_eq!(shader.passes[0].queue, RenderQueue::Opaque);
+        assert_eq!(shader.passes[0].vertex_inputs.stride, 16);
+        assert_eq!(shader.passes[1].name, "Shadow");
+        assert_eq!(shader.passes[1].cull, CullMode::Front);
+        assert_eq!(shader.passes[1].queue, RenderQueue::Transparent);
+    }
 }

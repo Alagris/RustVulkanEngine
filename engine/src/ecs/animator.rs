@@ -6,7 +6,9 @@ use anyhow::{Result, anyhow, bail};
 use glam::Mat4;
 use std::any::Any;
 
-#[crate::ecs::component]
+#[crate::ecs::component(
+    deserialize_with = crate::render_loop::deserialize_animator_component
+)]
 #[derive(crate::ecs::Component)]
 #[require(SkinnedMesh)]
 pub struct Animator {

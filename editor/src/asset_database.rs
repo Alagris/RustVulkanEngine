@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 #[cfg(debug_assertions)]
-use engine::ecs::component::{ComponentRuleRegistration, inventory};
-use engine::render_pipeline::shader_asset_name;
+use engine::ecs::component::{ComponentRegistration, inventory};
+use engine::render_pipeline::{preprocess_shader_file, shader_asset_name_from_path};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -113,9 +113,7 @@ impl AssetDatabase {
                     .ok_or_else(|| anyhow!("asset has an invalid filename: {}", path.display()))?
                     .to_owned();
                 let name = if asset_type == AssetType::Shader {
-                    let source = fs::read_to_string(&path)
-                        .with_context(|| format!("Failed to read shader {}", path.display()))?;
-                    shader_asset_name(&source).with_context(|| {
+                    shader_asset_name_from_path(&path).with_context(|| {
                         format!(
                             "Failed to read declared shader name from {}",
                             path.display()
@@ -357,9 +355,13 @@ impl AssetDatabase {
                     name: shader_name.clone(),
                     asset_type: AssetType::Shader,
                 })?;
+                let expanded_shader = preprocess_shader_file(source)?;
+                let staged_shader = stage.join(format!("{shader_name}.shader"));
+                fs::write(&staged_shader, expanded_shader)
+                    .with_context(|| format!("Failed to stage shader {}", source.display()))?;
                 self.process(
                     AssetType::Shader,
-                    source,
+                    &staged_shader,
                     &output.join("shaders").join(format!("{shader_name}.shader")),
                 )?;
             }
@@ -439,7 +441,7 @@ fn validate_game_object(object: &serde_yaml::Value, path: &str) -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
 
     for component_type in &component_types {
-        let mut registrations = inventory::iter::<ComponentRuleRegistration>
+        let mut registrations = inventory::iter::<ComponentRegistration>
             .into_iter()
             .filter(|rules| rules.type_name == component_type);
         let Some(rules) = registrations.next() else {
@@ -522,7 +524,7 @@ mod tests {
 
     fn write_sample_project(root: &Path) {
         fs::create_dir_all(root.join("materials")).unwrap();
-        fs::create_dir_all(root.join("shaders")).unwrap();
+        fs::create_dir_all(root.join("shaders").join("common")).unwrap();
         fs::write(
             root.join("pipeline.pipe"),
             r#"
@@ -545,10 +547,17 @@ passes:
     pass "Main" {
         face "back"
         queue "opaque"
-        hlsl { struct VertexInput { float3 position : POSITION; }; }
+        hlsl {
+            #include "common/vertex.hlsl"
+        }
     }
 }"#;
         fs::write(root.join("shaders").join("lit.shader"), shader).unwrap();
+        fs::write(
+            root.join("shaders").join("common").join("vertex.hlsl"),
+            "struct VertexInput { float3 position : POSITION; };\n",
+        )
+        .unwrap();
         fs::write(
             root.join("shaders").join("unused.shader"),
             shader.replace("LitShader", "UnusedShader"),
@@ -751,11 +760,11 @@ passes:
                 .unwrap()
                 .contains("# material processed")
         );
-        assert!(
-            fs::read_to_string(output.join("shaders").join("LitShader.shader"))
-                .unwrap()
-                .starts_with("// shader processed")
-        );
+        let packaged_shader =
+            fs::read_to_string(output.join("shaders").join("LitShader.shader")).unwrap();
+        assert!(packaged_shader.starts_with("// shader processed"));
+        assert!(packaged_shader.contains("struct VertexInput"));
+        assert!(!packaged_shader.contains("#include"));
         assert!(!output.join("shaders").join("UnusedShader.shader").exists());
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(output).unwrap();

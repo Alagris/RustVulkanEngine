@@ -1,7 +1,8 @@
+use crate::parsers::hlsl_preprocessor;
 use crate::parsers::material_parser;
 use crate::render_pipeline::{
     BufferSettings, ColorFormat, DepthFormat, PresentMode, RenderBufferSettings, RenderPass,
-    RenderPipeline, ShaderPassMetadata, SwapchainSettings, parse_shader_definition,
+    RenderPipeline, ShaderPassMetadata, SwapchainSettings,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
@@ -216,7 +217,14 @@ impl RenderPipeline {
             };
             let shader_source = fs::read_to_string(&shader_path)
                 .with_context(|| format!("Failed to read shader {}", shader_path.display()))?;
-            let shader = parse_shader_definition(&shader_source)
+            let shader_source = hlsl_preprocessor::expand_source(&shader_source, &shader_path)
+                .with_context(|| {
+                    format!(
+                        "Failed to expand HLSL directives in {}",
+                        shader_path.display()
+                    )
+                })?;
+            let shader = material_parser::parse_shader_definition(&shader_source)
                 .with_context(|| format!("Invalid shader {}", shader_path.display()))?;
             let metadata: ShaderPassMetadata = shader
                 .passes

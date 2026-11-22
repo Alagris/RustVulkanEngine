@@ -131,6 +131,9 @@ impl Camera {
             cascade_splits: Vec4::from_array(cascade_splits).to_array(),
             cascade_index: 0,
             padding: [0; 3],
+            directional_light_direction: [0.0, -1.0, 0.0, 0.0],
+            directional_light_color_intensity: [1.0, 1.0, 1.0, 0.0],
+            camera_position: camera_position.extend(1.0).to_array(),
         })
     }
 }

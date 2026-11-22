@@ -1,10 +1,7 @@
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use shaderc::{CompileOptions, Compiler, EnvVersion, ShaderKind, SourceLanguage, TargetEnv};
-use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
-
-lalrpop_util::lalrpop_mod!(shader_grammar);
 
 #[derive(Clone, Debug)]
 pub struct RenderPipeline {
@@ -150,230 +147,19 @@ pub(crate) struct ShaderDefinition {
     pub(crate) passes: Vec<ShaderPassMetadata>,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) enum Token {
-    Shader,
-    Pass,
-    Face,
-    Queue,
-    Hlsl,
-    LBrace,
-    RBrace,
-    Identifier(String),
-    Quoted(String),
-    Text(String),
+pub fn shader_asset_name(source: &str) -> Result<String> {
+    crate::parsers::material_parser::shader_asset_name(source)
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct LexError {
-    pub(crate) offset: usize,
-    pub(crate) message: String,
+pub fn shader_asset_name_from_path(path: &std::path::Path) -> Result<String> {
+    preprocess_shader_file(path).and_then(|source| shader_asset_name(&source))
 }
 
-impl std::fmt::Display for LexError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{} at byte {}", self.message, self.offset)
-    }
-}
-
-impl std::error::Error for LexError {}
-
-impl std::fmt::Display for Token {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{self:?}")
-    }
-}
-
-struct ShaderLexer<'input> {
-    source: &'input str,
-    offset: usize,
-    in_hlsl: bool,
-    hlsl_depth: usize,
-    after_hlsl_keyword: bool,
-}
-
-impl<'input> ShaderLexer<'input> {
-    fn new(source: &'input str) -> Self {
-        Self {
-            source,
-            offset: 0,
-            in_hlsl: false,
-            hlsl_depth: 0,
-            after_hlsl_keyword: false,
-        }
-    }
-
-    fn take_while(&mut self, predicate: impl Fn(char) -> bool) -> &'input str {
-        let start = self.offset;
-        while let Some(character) = self.source[self.offset..].chars().next() {
-            if !predicate(character) {
-                break;
-            }
-            self.offset += character.len_utf8();
-        }
-        &self.source[start..self.offset]
-    }
-
-    fn quoted(&mut self) -> std::result::Result<Token, LexError> {
-        let start = self.offset;
-        self.offset += 1;
-        let mut escaped = false;
-        while let Some(character) = self.source[self.offset..].chars().next() {
-            self.offset += character.len_utf8();
-            if escaped {
-                if !matches!(character, '"' | '\\' | 'n' | 'r' | 't') {
-                    return Err(LexError {
-                        offset: self.offset - character.len_utf8() - 1,
-                        message: format!("unsupported escape '\\{}'", character),
-                    });
-                }
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                return Ok(Token::Quoted(self.source[start..self.offset].to_owned()));
-            }
-        }
-        Err(LexError {
-            offset: start,
-            message: "unterminated quoted string".to_owned(),
-        })
-    }
-
-    fn comment(&mut self) -> &'input str {
-        let start = self.offset;
-        if self.source[self.offset..].starts_with("//") {
-            self.offset += 2;
-            self.take_while(|character| character != '\n');
-        } else {
-            self.offset += 2;
-            while self.offset < self.source.len() && !self.source[self.offset..].starts_with("*/") {
-                let character = self.source[self.offset..].chars().next().unwrap();
-                self.offset += character.len_utf8();
-            }
-            if self.source[self.offset..].starts_with("*/") {
-                self.offset += 2;
-            }
-        }
-        &self.source[start..self.offset]
-    }
-}
-
-impl Iterator for ShaderLexer<'_> {
-    type Item = std::result::Result<(usize, Token, usize), LexError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.offset < self.source.len() {
-            let start = self.offset;
-            let rest = &self.source[self.offset..];
-            let character = rest.chars().next().unwrap();
-
-            if rest.starts_with("//") || rest.starts_with("/*") {
-                let text = self.comment().to_owned();
-                if self.in_hlsl {
-                    return Some(Ok((start, Token::Text(text), self.offset)));
-                }
-                continue;
-            }
-
-            if character.is_whitespace() {
-                let text = self.take_while(char::is_whitespace).to_owned();
-                if self.in_hlsl {
-                    return Some(Ok((start, Token::Text(text), self.offset)));
-                }
-                continue;
-            }
-
-            let token = if character == '"' {
-                match self.quoted() {
-                    Ok(token) => token,
-                    Err(error) => return Some(Err(error)),
-                }
-            } else if character == '\'' && self.in_hlsl {
-                let start = self.offset;
-                self.offset += 1;
-                let mut escaped = false;
-                let mut terminated = false;
-                while let Some(character) = self.source[self.offset..].chars().next() {
-                    self.offset += character.len_utf8();
-                    if escaped {
-                        escaped = false;
-                    } else if character == '\\' {
-                        escaped = true;
-                    } else if character == '\'' {
-                        terminated = true;
-                        break;
-                    }
-                }
-                if !terminated {
-                    return Some(Err(LexError {
-                        offset: start,
-                        message: "unterminated character literal".to_owned(),
-                    }));
-                }
-                Token::Text(self.source[start..self.offset].to_owned())
-            } else if character.is_ascii_alphabetic() || character == '_' {
-                let word = self
-                    .take_while(|character| character.is_ascii_alphanumeric() || character == '_');
-                match word {
-                    "shader" => Token::Shader,
-                    "pass" => Token::Pass,
-                    "face" => Token::Face,
-                    "queue" => Token::Queue,
-                    "hlsl" => Token::Hlsl,
-                    _ => Token::Identifier(word.to_owned()),
-                }
-            } else {
-                self.offset += character.len_utf8();
-                match character {
-                    '{' => {
-                        if self.after_hlsl_keyword {
-                            self.in_hlsl = true;
-                            self.hlsl_depth = 1;
-                            self.after_hlsl_keyword = false;
-                        } else if self.in_hlsl {
-                            self.hlsl_depth += 1;
-                        }
-                        Token::LBrace
-                    }
-                    '}' => {
-                        if self.in_hlsl {
-                            self.hlsl_depth -= 1;
-                            if self.hlsl_depth == 0 {
-                                self.in_hlsl = false;
-                            }
-                        }
-                        Token::RBrace
-                    }
-                    _ if self.in_hlsl => Token::Text(character.to_string()),
-                    _ => {
-                        return Some(Err(LexError {
-                            offset: start,
-                            message: format!("unexpected character '{}'", character),
-                        }));
-                    }
-                }
-            };
-
-            self.after_hlsl_keyword = !self.in_hlsl && matches!(token, Token::Hlsl);
-            let token = if self.in_hlsl {
-                match token {
-                    Token::Identifier(text) => Token::Text(text),
-                    Token::Quoted(text) => Token::Text(text),
-                    Token::Shader => Token::Text("shader".to_owned()),
-                    Token::Pass => Token::Text("pass".to_owned()),
-                    Token::Face => Token::Text("face".to_owned()),
-                    Token::Queue => Token::Text("queue".to_owned()),
-                    Token::Hlsl => Token::Text("hlsl".to_owned()),
-                    token => token,
-                }
-            } else {
-                token
-            };
-            return Some(Ok((start, token, self.offset)));
-        }
-        None
-    }
+pub fn preprocess_shader_file(path: &std::path::Path) -> Result<String> {
+    let source = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read shader {}", path.display()))?;
+    crate::parsers::hlsl_preprocessor::expand_source(&source, path)
+        .with_context(|| format!("Failed to expand HLSL directives in {}", path.display()))
 }
 
 impl RenderPipeline {
@@ -445,52 +231,10 @@ impl RenderPipeline {
     }
 }
 
-pub(crate) fn parse_shader_definition(source: &str) -> Result<ShaderDefinition> {
-    let mut shader = shader_grammar::ShaderParser::new()
-        .parse(ShaderLexer::new(source))
-        .map_err(|error| anyhow!("{error}"))?;
-    let mut names = HashSet::new();
-    for pass in &mut shader.passes {
-        if !names.insert(&pass.name) {
-            bail!("shader pass names must be unique: '{}'", pass.name);
-        }
-        let (vertex_inputs, instance_inputs) =
-            crate::parsers::hlsl_parser::parse_input_layouts(&pass.hlsl)
-                .with_context(|| format!("Invalid input layout in shader pass '{}'", pass.name))?;
-        pass.vertex_inputs = vertex_inputs;
-        pass.instance_inputs = instance_inputs;
-    }
-    Ok(shader)
-}
-
-pub fn shader_asset_name(source: &str) -> Result<String> {
-    parse_shader_definition(source).map(|shader| shader.name)
-}
-
-pub(super) fn unquote(value: String) -> String {
-    let mut chars = value[1..value.len() - 1].chars();
-    let mut decoded = String::new();
-    while let Some(character) = chars.next() {
-        if character == '\\' {
-            let escaped = chars.next().expect("lexer validates quoted escapes");
-            decoded.push(match escaped {
-                '"' => '"',
-                '\\' => '\\',
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                _ => unreachable!("lexer validates quoted escapes"),
-            });
-        } else {
-            decoded.push(character);
-        }
-    }
-    decoded
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parsers::material_parser::parse_shader_definition;
 
     fn temporary_directory(name: &str) -> PathBuf {
         let nonce = std::time::SystemTime::now()
@@ -501,42 +245,6 @@ mod tests {
             std::env::temp_dir().join(format!("engine-{name}-{}-{nonce}", std::process::id()));
         fs::create_dir_all(&directory).unwrap();
         directory
-    }
-
-    #[test]
-    fn parses_multiple_shader_passes_with_quoted_metadata() {
-        let source = r#"
-shader "Test" {
-    pass "Forward" {
-        face "back"
-        queue "opaque"
-        hlsl {
-            struct VertexInput { float3 position : POSITION; };
-            float4 VSMain(VertexInput input) : SV_Position { return 0; }
-            float4 PSMain() : SV_Target0 { return 1; }
-        }
-    }
-    pass "Shadow" {
-        face "front"
-        queue "transparent"
-        hlsl {
-            struct VertexInput { float3 position : POSITION; };
-            float4 VSMain(VertexInput input) : SV_Position { return 0; }
-            float4 PSMain() : SV_Target0 { return 1; }
-        }
-    }
-}
-"#;
-        let shader = parse_shader_definition(source).unwrap();
-        assert_eq!(shader.name, "Test");
-        assert_eq!(shader.passes.len(), 2);
-        assert_eq!(shader.passes[0].name, "Forward");
-        assert_eq!(shader.passes[0].cull, CullMode::Back);
-        assert_eq!(shader.passes[0].queue, RenderQueue::Opaque);
-        assert_eq!(shader.passes[0].vertex_inputs.stride, 16);
-        assert_eq!(shader.passes[1].name, "Shadow");
-        assert_eq!(shader.passes[1].cull, CullMode::Front);
-        assert_eq!(shader.passes[1].queue, RenderQueue::Transparent);
     }
 
     #[test]
@@ -615,6 +323,58 @@ passes:
                 .to_string()
                 .contains("not declared")
         );
+        fs::remove_dir_all(base_dir).unwrap();
+    }
+
+    #[test]
+    fn pipeline_loader_expands_hlsl_includes_before_input_layout_analysis() {
+        let base_dir = temporary_directory("hlsl-includes");
+        fs::create_dir_all(base_dir.join("shaders").join("common")).unwrap();
+        fs::write(
+            base_dir.join("material.mat"),
+            "material:\n  name: IncludedMaterial\n  shader: shaders/included.shader\n",
+        )
+        .unwrap();
+        fs::write(
+            base_dir.join("shaders").join("common").join("vertex.hlsl"),
+            "#if defined(USE_POSITION)\nstruct VertexInput { float3 position : POSITION; };\n#else\nstruct VertexInput { float2 position : TEXCOORD0; };\n#endif\n",
+        )
+        .unwrap();
+        fs::write(
+            base_dir.join("shaders").join("included.shader"),
+            r#"
+shader "IncludedShader" {
+    pass "Forward" {
+        face "back"
+        queue "opaque"
+        hlsl {
+            #define USE_POSITION 1
+            #include "common/vertex.hlsl"
+            float4 VSMain(VertexInput input) : SV_Position { return float4(input.position, 1.0); }
+            float4 PSMain() : SV_Target0 { return float4(1.0, 1.0, 1.0, 1.0); }
+        }
+    }
+}
+"#,
+        )
+        .unwrap();
+        let source = r#"
+pipeline:
+  name: Included
+passes:
+  - name: Forward
+    material: material.mat
+    shader_pass: Forward
+    color_target: swapchain
+"#;
+
+        let pipeline = RenderPipeline::from_yaml(source, &base_dir).unwrap();
+        let pass = &pipeline.passes[0];
+        assert_eq!(pass.shader_name, "IncludedShader");
+        assert_eq!(pass.metadata.vertex_inputs.attributes.len(), 1);
+        assert!(pass.metadata.hlsl.contains("struct VertexInput"));
+        assert!(!pass.metadata.hlsl.contains("#include"));
+        assert!(!pass.metadata.hlsl.contains("float2 position"));
         fs::remove_dir_all(base_dir).unwrap();
     }
 }

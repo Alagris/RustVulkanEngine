@@ -13,7 +13,12 @@ shader "CubeLit" {
                 uint cascadeIndex;
                 uint framePaddingX;
                 uint2 framePadding;
+                float4 directionalLightDirection;
+                float4 directionalLightColorIntensity;
+                float4 cameraPosition;
             };
+
+            #include "common/phong.hlsl"
 
             [[vk::binding(1, 0)]]
             Texture2DArray<float> shadowMap : register(t0);
@@ -69,8 +74,15 @@ shader "CubeLit" {
                     shadowSampler,
                     float3(uv, cascade),
                     projected.z - 0.001);
-                float lighting = 0.25 + 0.75 * shadow;
-                return float4(input.color.rgb * lighting, input.color.a);
+                float3 normal = normalize(cross(ddx(input.worldPosition), ddy(input.worldPosition)));
+                float3 viewDirection = normalize(cameraPosition.xyz - input.worldPosition);
+                float3 color = ComputePhongLighting(
+                    input.color.rgb,
+                    normal,
+                    viewDirection,
+                    32.0,
+                    shadow);
+                return float4(color, input.color.a);
             }
         }
     }

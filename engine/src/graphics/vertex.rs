@@ -41,4 +41,7 @@ pub struct FrameUniform {
     pub cascade_splits: [f32; 4],
     pub cascade_index: u32,
     pub padding: [u32; 3],
+    pub directional_light_direction: [f32; 4],
+    pub directional_light_color_intensity: [f32; 4],
+    pub camera_position: [f32; 4],
 }

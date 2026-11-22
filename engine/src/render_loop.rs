@@ -1,5 +1,9 @@
 use crate::app::App;
-use crate::ecs::{Camera, ComponentRegistry, InstancedMesh, Mesh, ProceduralMesh, Scene};
+use crate::ecs::mesh_serde::{
+    AnimatorSettings, InstancedMeshSettings, PrimitiveMeshSettings, ProceduralMeshSettings,
+    SkinnedMeshSettings,
+};
+use crate::ecs::{Animator, Camera, ComponentRegistry, InstancedMesh, Mesh, ProceduralMesh, Scene};
 use crate::graphics::{GpuContext, Graphics, InstanceBuffer, Mesh as GraphicsMesh};
 use crate::material::{Material, ShaderPass};
 use crate::proc_mesh;
@@ -7,10 +11,11 @@ use crate::render_pipeline::RenderPipeline;
 use crate::settings::RuntimeSettings;
 use anyhow::{Context, Result, anyhow};
 use glam::{Mat4, Vec3A};
-use serde::Deserialize;
+use serde_yaml::Value;
+use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -80,7 +85,15 @@ impl RenderLoop {
             frame_uniform,
         )?;
         let context = app.gpu_context();
-        register_mesh_components(&mut registry, context, materials)?;
+        registry.set_context(MeshFactoryContext {
+            context,
+            materials,
+            asset_root: settings
+                .pipeline
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf(),
+        });
         let mut scene = Scene::load(&settings.default_scene, &registry)?;
         scene.initialize()?;
         let size = window.inner_size();
@@ -184,10 +197,20 @@ fn frame_for_scene(
     aspect: f32,
     cascade_count: u32,
 ) -> Result<crate::graphics::FrameUniform> {
-    match scene.find_component::<Camera>() {
-        Some(camera) => camera.frame_uniform(aspect, cascade_count),
-        None => default_camera.frame_uniform(aspect, cascade_count),
+    let mut frame = match scene.find_component::<Camera>() {
+        Some(camera) => camera
+            .with(|camera| camera.frame_uniform(aspect, cascade_count))
+            .ok_or_else(|| anyhow!("scene Camera component is no longer alive"))??,
+        None => default_camera.frame_uniform(aspect, cascade_count)?,
+    };
+    if let Some(light) = scene.find_component::<crate::ecs::DirectionalLight>() {
+        let (direction, color_intensity) = light
+            .with(crate::ecs::DirectionalLight::uniform_values)
+            .ok_or_else(|| anyhow!("scene DirectionalLight component is no longer alive"))??;
+        frame.directional_light_direction = direction;
+        frame.directional_light_color_intensity = color_intensity;
     }
+    Ok(frame)
 }
 
 fn load_materials(pipeline: &RenderPipeline) -> Result<HashMap<String, Arc<Material>>> {
@@ -215,86 +238,97 @@ fn load_materials(pipeline: &RenderPipeline) -> Result<HashMap<String, Arc<Mater
         .collect()
 }
 
-#[derive(Deserialize)]
-#[serde(default)]
-struct PrimitiveMeshSettings {
-    primitive: String,
-    material: String,
-    size: [f32; 3],
-    width: f32,
-    depth: f32,
-    segments_x: u32,
-    segments_z: u32,
-}
-
-impl Default for PrimitiveMeshSettings {
-    fn default() -> Self {
-        Self {
-            primitive: "cube".to_owned(),
-            material: String::new(),
-            size: [1.0; 3],
-            width: 10.0,
-            depth: 10.0,
-            segments_x: 1,
-            segments_z: 1,
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct ProceduralMeshSettings {
-    material: String,
-    vertices: i32,
-    #[serde(default = "one")]
-    instances: i32,
-}
-
-#[derive(Deserialize)]
-struct InstancedMeshSettings {
-    #[serde(flatten)]
-    primitive: PrimitiveMeshSettings,
-    transforms: Vec<[f32; 16]>,
-}
-
-fn register_mesh_components(
-    registry: &mut ComponentRegistry,
+struct MeshFactoryContext {
     context: GpuContext,
     materials: HashMap<String, Arc<Material>>,
-) -> Result<()> {
-    let materials = Arc::new(materials);
-    {
-        let context = context.clone();
-        let materials = Arc::clone(&materials);
-        registry.register_typed::<Mesh>("Mesh", move |data| {
-            let settings: PrimitiveMeshSettings = serde_yaml::from_value(data.clone())?;
-            let material = get_material(&materials, &settings.material)?;
-            let mesh = create_primitive_mesh(&context, material, &settings)?;
-            Ok(Mesh::new(mesh))
-        })?;
+    asset_root: PathBuf,
+}
+
+fn mesh_factory_context(context: Option<&dyn Any>) -> Result<&MeshFactoryContext> {
+    context
+        .and_then(|context| context.downcast_ref::<MeshFactoryContext>())
+        .ok_or_else(|| anyhow!("component deserialization requires render-loop context"))
+}
+
+pub(crate) fn deserialize_mesh_component(data: &Value, context: Option<&dyn Any>) -> Result<Mesh> {
+    let settings: PrimitiveMeshSettings = serde_yaml::from_value(data.clone())?;
+    let context = mesh_factory_context(context)?;
+    let material = get_material(&context.materials, &settings.material)?;
+    let mesh = create_primitive_mesh(&context.context, material, &settings)?;
+    Ok(Mesh::new(mesh))
+}
+
+pub(crate) fn deserialize_procedural_mesh_component(
+    data: &Value,
+    context: Option<&dyn Any>,
+) -> Result<ProceduralMesh> {
+    let settings: ProceduralMeshSettings = serde_yaml::from_value(data.clone())?;
+    let context = mesh_factory_context(context)?;
+    let material = get_material(&context.materials, &settings.material)?;
+    ProceduralMesh::new(material, settings.vertices, settings.instances)
+}
+
+pub(crate) fn deserialize_instanced_mesh_component(
+    data: &Value,
+    context: Option<&dyn Any>,
+) -> Result<InstancedMesh> {
+    let settings: InstancedMeshSettings = serde_yaml::from_value(data.clone())?;
+    let context = mesh_factory_context(context)?;
+    let material = get_material(&context.materials, &settings.primitive.material)?;
+    let mesh = create_primitive_mesh(&context.context, material, &settings.primitive)?;
+    let transforms = settings
+        .transforms
+        .into_iter()
+        .map(|matrix| Mat4::from_cols_array(&matrix))
+        .collect::<Vec<_>>();
+    let instances = InstanceBuffer::new(&context.context, &transforms)?;
+    Ok(InstancedMesh::new(mesh, &instances))
+}
+
+pub(crate) fn deserialize_skinned_mesh_component(
+    data: &Value,
+    context: Option<&dyn Any>,
+) -> Result<crate::ecs::SkinnedMesh> {
+    let settings: SkinnedMeshSettings = serde_yaml::from_value(data.clone())?;
+    let context = mesh_factory_context(context)?;
+    let material = get_material(&context.materials, &settings.material)?;
+    let path = resolve_component_asset(&context.asset_root, &settings.fbx);
+    let meshes = crate::graphics::fbx::load_meshes_from_fbx(&context.context, path, material)?;
+    if let Some(name) = settings.mesh {
+        return meshes
+            .into_iter()
+            .find(|mesh| mesh.name == name)
+            .ok_or_else(|| anyhow!("FBX contains no mesh named '{name}'"));
     }
-    {
-        let materials = Arc::clone(&materials);
-        registry.register_typed::<ProceduralMesh>("ProceduralMesh", move |data| {
-            let settings: ProceduralMeshSettings = serde_yaml::from_value(data.clone())?;
-            let material = get_material(&materials, &settings.material)?;
-            ProceduralMesh::new(material, settings.vertices, settings.instances)
-        })?;
+    if meshes.len() != 1 {
+        return Err(anyhow!(
+            "FBX contains {} meshes; specify the `mesh` field",
+            meshes.len()
+        ));
     }
-    {
-        registry.register_typed::<InstancedMesh>("InstancedMesh", move |data| {
-            let settings: InstancedMeshSettings = serde_yaml::from_value(data.clone())?;
-            let material = get_material(&materials, &settings.primitive.material)?;
-            let mesh = create_primitive_mesh(&context, material, &settings.primitive)?;
-            let transforms = settings
-                .transforms
-                .into_iter()
-                .map(|matrix| Mat4::from_cols_array(&matrix))
-                .collect::<Vec<_>>();
-            let instances = InstanceBuffer::new(&context, &transforms)?;
-            Ok(InstancedMesh::new(mesh, &instances))
-        })?;
+    meshes
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("FBX contains no renderable meshes"))
+}
+
+pub(crate) fn deserialize_animator_component(
+    data: &Value,
+    context: Option<&dyn Any>,
+) -> Result<Animator> {
+    let settings: AnimatorSettings = serde_yaml::from_value(data.clone())?;
+    let context = mesh_factory_context(context)?;
+    let path = resolve_component_asset(&context.asset_root, &settings.fbx);
+    Animator::new(crate::graphics::fbx::load_animations_from_fbx(path)?)
+}
+
+fn resolve_component_asset(asset_root: &Path, path: &str) -> PathBuf {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        asset_root.join(path)
     }
-    Ok(())
 }
 
 fn create_primitive_mesh(
@@ -321,10 +355,6 @@ fn get_material(materials: &HashMap<String, Arc<Material>>, name: &str) -> Resul
         .get(name)
         .cloned()
         .ok_or_else(|| anyhow!("scene refers to unknown material '{}'", name))
-}
-
-fn one() -> i32 {
-    1
 }
 
 fn read_spirv(path: &Path) -> Result<Arc<[u32]>> {
