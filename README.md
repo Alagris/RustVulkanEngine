@@ -21,14 +21,21 @@ For a bounded smoke run that exits after ten successfully presented frames:
 cargo run -p game -- --frames 10
 ```
 
-The workspace has four crates: `engine` contains the graphics API and runtime,
-`component_macros` provides component derive/attribute macros, `editor` indexes
-and resolves game assets, and `game` is the sample project.
+The workspace includes `engine` (graphics API and runtime), `component_macros`,
+`editor`, `game`, the vendored PhysX bindings (`physx` and `physx-sys`), the
+`physx-safe` engine-facing wrapper, and the upstream `pxbind` binding generator.
 The game project loads `game/assets/pipeline.pipe`; the editor resolves
 `(asset name, asset type)` references to absolute development paths before the
 engine sees them. HLSL is compiled into SPIR-V through the embedded `shaderc`
 crate without launching an external compiler. The sample renders a parametric
 cube and segmented plane, including cascaded cube shadows on the plane.
+
+The PhysX source is vendored under `physics/physx-rs` rather than included as a
+Git submodule. `physx-safe` provides validated collider/material descriptors
+and a thread-affine physics-world wrapper that does not expose native pointers.
+The current wrapper runs PhysX on the CPU; CUDA context creation and PhysX GPU
+library linking remain future work. See [`physics/README.md`](physics/README.md)
+for provenance, build requirements, and known safety boundaries.
 
 Compile shaders without opening a window:
 

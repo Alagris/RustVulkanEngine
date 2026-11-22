@@ -1,0 +1,40 @@
+[bans]
+multiple-versions = "deny"
+deny = [
+    { name = "openssl" },
+
+    # library choices we've made
+    { name = "nalgebra" },     # we use glam as math library, not nalgebra 
+    { name = "nalgebra-glm" }, # we use glam as math library, not nalgebra 
+    { name = "ncollide3d" },   # we use PhysX, not nphysics/nalgebra 
+    { name = "nphysics" },     # we use PhysX, not nphysics/nalgebra 
+
+    # deprecated/abandoned
+    { name = "term" },              # term is not fully maintained, and termcolor is replacing it
+    { name = "quickersort" },       # explicitly deprecated
+    { name = "build-helper" },      # abandoned, and doesn't add much value
+    { name = "app_dirs" },          # abandoned, use app_dirs2 instead
+    { name = "colored" },           # not actively maintained? slow to merge update fixes in and has lots of old dependencies
+    { name = "floating-duration" }, # not needed with Rust 1.38, and very few users and commits
+    { name = "mopa" },              # abandoned, have not been updated for 4 years
+]
+skip = []
+skip-tree = [
+    # window-sys duplicates, only used by pxbind, doesn't affect physx-sys/physx itself
+    { name = "windows-sys" },
+
+
+    # rustix duplicates, 
+    # latest tempfile uses rustix v0.37.23, while latest env_logger v0.10.0 uses 0.38.3 
+    # only used by pxbind
+    { name = "rustix" },
+]
+
+[licenses]
+unlicensed = "deny"
+allow-osi-fsf-free = "neither"
+# We want really high confidence when inferring licenses from text
+confidence-threshold = 0.92
+allow = ["Apache-2.0", "BSD-3-Clause", "MIT"]
+
+exceptions = [{ allow = ["Unicode-DFS-2016"], name = "unicode-ident" }]
