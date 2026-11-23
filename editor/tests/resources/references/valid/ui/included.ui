@@ -1,0 +1,4 @@
+<Stack id="included">
+    <Reference key="pine" type="prefab" path="variants/pine.prefab"/>
+    <Label>Included references</Label>
+</Stack>

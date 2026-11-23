@@ -1,0 +1,4 @@
+<Canvas>
+    <List id="first" template="ui/row.ui"/>
+    <Table id="second" template="variants/row.ui"/>
+</Canvas>

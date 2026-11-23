@@ -1,0 +1,6 @@
+root:
+  name: WrongTree
+  components:
+    - type: Foliage
+      data:
+        prefabs: [{asset: {type: prefab, path: row.ui}}]

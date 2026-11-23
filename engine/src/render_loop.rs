@@ -64,15 +64,19 @@ impl RenderLoop {
             log::info!("Shader compilation completed.");
             return Ok(());
         }
-        let data_assets = match &settings.data_assets {
-            Some(path) => crate::data::DataAssetDatabase::load_dir(path)
-                .with_context(|| format!("Failed to load data assets from {}", path.display()))?,
-            None => crate::data::DataAssetDatabase::from_documents(Vec::new())?,
-        };
+        let asset_store = settings
+            .data_assets
+            .as_ref()
+            .map(crate::assets::AssetStore::load)
+            .transpose()
+            .context("Failed to load runtime assets")?;
         let input_system = match settings.input_asset.as_deref() {
             Some(name) => {
-                let input_asset = data_assets
-                    .get::<crate::input::Input>(name)
+                let input_asset = asset_store
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("input_asset requires an asset directory"))?
+                    .data_assets()
+                    .try_get::<crate::input::Input>(name)?
                     .ok_or_else(|| anyhow!("input data asset '{name}' was not loaded"))?;
                 let mut input = crate::input::InputSystem::from_data_asset(&input_asset)?;
                 if let Some(map) = settings.active_input_map.as_deref() {
@@ -135,7 +139,10 @@ impl RenderLoop {
                 .unwrap_or_else(|| Path::new("."))
                 .to_path_buf(),
         });
-        let mut scene = Scene::load(&settings.default_scene, &registry)?;
+        let mut scene = match &asset_store {
+            Some(assets) => assets.load_scene(&settings.default_scene, &registry)?,
+            None => Scene::load(&settings.default_scene, &registry)?,
+        };
         if let Some(input_system) = input_system {
             scene.configure_input(input_system)?;
         }
@@ -166,6 +173,7 @@ impl RenderLoop {
         let mut previous_frame = Instant::now();
 
         let event_result = event_loop.run(move |event, elwt| {
+            let _keep_assets_alive = &asset_store;
             let report_input_error = |error: anyhow::Error| {
                 log::error!("Input processing failed: {error:#}");
                 match callback_error.lock() {

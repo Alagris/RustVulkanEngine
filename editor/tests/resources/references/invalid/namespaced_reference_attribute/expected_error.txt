@@ -1,0 +1,1 @@
+XML namespaces are not supported for UI attributes

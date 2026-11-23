@@ -17,4 +17,6 @@ pub struct TableStyle {
 #[element(style = TableStyle, layout)]
 #[derive(Clone, Debug, Default, Deserialize, Element)]
 #[serde(deny_unknown_fields)]
-pub struct Table {}
+pub struct Table {
+    pub template: Option<crate::assets::UiDocumentRef>,
+}

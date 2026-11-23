@@ -1,209 +1,14 @@
-use crate::asset_database::{AssetDatabase, read_yaml};
-use anyhow::{Context, Result, anyhow, bail};
-use engine::data::yaml::merge_values;
-use engine::ecs::{ComponentRegistry, GameObject, Scene, Unique};
-use serde_yaml::{Mapping, Value};
-use std::path::{Path, PathBuf};
-
-/// Resolved editor-side prefab data; instances are ordinary scene GameObjects.
-///
-/// Mappings merge recursively. Arrays merge by `id` when every entry is identified; other arrays
-/// replace inherited values. An id-keyed entry with `remove: true` deletes an inherited entry.
-#[derive(Clone, Debug)]
-pub struct Prefab {
-    pub name: String,
-    pub root: Value,
-}
-
-impl Prefab {
-    pub fn load(name: &str, assets: &AssetDatabase) -> Result<Self> {
-        let mut stack = Vec::new();
-        let root = assets
-            .resolve_prefab_root(name, &mut stack)
-            .with_context(|| format!("Failed to resolve prefab '{name}'"))?;
-        Ok(Self {
-            name: name.to_owned(),
-            root,
-        })
-    }
-
-    pub fn instantiate(
-        &self,
-        scene: &mut Scene,
-        registry: &ComponentRegistry,
-    ) -> Result<Unique<GameObject>> {
-        let source = serde_yaml::to_string(&self.root)
-            .with_context(|| format!("Failed to serialize prefab '{}'", self.name))?;
-        scene
-            .instantiate_game_object(&source, registry)
-            .with_context(|| format!("Failed to instantiate prefab '{}'", self.name))
-    }
-
-    pub fn expand_scene(scene: &mut Value, assets: &AssetDatabase) -> Result<()> {
-        let root = scene
-            .as_mapping_mut()
-            .and_then(|scene| scene.get_mut(Value::String("root".to_owned())))
-            .ok_or_else(|| anyhow!("scene must contain a root game object"))?;
-        let mut stack = Vec::new();
-        expand_game_object(root, assets, &mut stack)?;
-        let source = serde_yaml::to_string(scene).context("Failed to serialize expanded scene")?;
-        Scene::validate_yaml(&source).context("Expanded scene does not match the scene schema")
-    }
-}
-
-pub(crate) fn load_prefab_path(
-    path: &Path,
-    assets: &AssetDatabase,
-    stack: &mut Vec<PathBuf>,
-) -> Result<Value> {
-    let path = path
-        .canonicalize()
-        .with_context(|| format!("Failed to resolve prefab path {}", path.display()))?;
-    if stack.contains(&path) {
-        let mut chain = stack
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>();
-        chain.push(path.display().to_string());
-        bail!(
-            "cyclic prefab inheritance or instantiation: {}",
-            chain.join(" -> ")
-        );
-    }
-    stack.push(path.clone());
-    let depth_before = stack.len();
-    let result = (|| {
-        let mut document = read_yaml(&path)?;
-        let mapping = document
-            .as_mapping_mut()
-            .ok_or_else(|| anyhow!("{} must contain a mapping", path.display()))?;
-        let parent = mapping
-            .remove(Value::String("parent".to_owned()))
-            .map(|parent| {
-                parent
-                    .as_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| anyhow!("{} parent must be a prefab asset name", path.display()))
-            })
-            .transpose()?;
-        let root_patch = mapping
-            .remove(Value::String("root".to_owned()))
-            .or_else(|| parent.as_ref().map(|_| Value::Mapping(Mapping::new())))
-            .ok_or_else(|| {
-                anyhow!(
-                    "{} must define root or inherit a parent prefab",
-                    path.display()
-                )
-            })?;
-        if !mapping.is_empty() {
-            bail!(
-                "{} contains unsupported prefab fields: {}",
-                path.display(),
-                mapping
-                    .keys()
-                    .filter_map(Value::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
-
-        let base = match parent {
-            Some(parent) => assets
-                .resolve_prefab_root(&parent, stack)
-                .with_context(|| {
-                    format!("Parent prefab '{parent}' of {} is invalid", path.display())
-                })?,
-            None => Value::Mapping(Mapping::new()),
-        };
-        let mut root = merge_values(base, root_patch)?;
-        if !root.is_mapping() {
-            bail!("{} root must be a mapping", path.display());
-        }
-        expand_game_object(&mut root, assets, stack)
-            .with_context(|| format!("Failed to expand prefab contents in {}", path.display()))?;
-        let scene = scene_with_root(root.clone());
-        let source = serde_yaml::to_string(&scene)?;
-        Scene::validate_yaml(&source).with_context(|| {
-            format!("{} does not resolve to a valid game object", path.display())
-        })?;
-        Ok(root)
-    })();
-    // Invariant: nested expansion must leave the resolution stack balanced.
-    assert_eq!(
-        stack.len(),
-        depth_before,
-        "prefab resolution stack must be balanced after expansion"
-    );
-    assert_eq!(
-        stack.last(),
-        Some(&path),
-        "prefab resolution stack top must be the prefab being resolved"
-    );
-    stack.pop();
-    result
-}
-
-fn expand_game_object(
-    object: &mut Value,
-    assets: &AssetDatabase,
-    stack: &mut Vec<PathBuf>,
-) -> Result<()> {
-    let mapping = object
-        .as_mapping_mut()
-        .ok_or_else(|| anyhow!("game object must be a mapping"))?;
-    let prefab = mapping.remove(Value::String("prefab".to_owned()));
-    if let Some(prefab) = prefab {
-        let name = prefab
-            .as_str()
-            .ok_or_else(|| anyhow!("game object prefab must name a prefab asset"))?;
-        let base = assets
-            .resolve_prefab_root(name, stack)
-            .with_context(|| format!("Failed to instantiate prefab '{name}'"))?;
-        let patch = Value::Mapping(mapping.clone());
-        *object = merge_values(base, patch)?;
-        let mapping = object
-            .as_mapping_mut()
-            .ok_or_else(|| anyhow!("resolved prefab root must be a mapping"))?;
-        expand_children(mapping, assets, stack)?;
-    } else {
-        expand_children(mapping, assets, stack)?;
-    }
-    // Postcondition: expansion must consume every prefab reference in this object.
-    debug_assert!(
-        object.get("prefab").is_none(),
-        "expanded game objects must not retain prefab references"
-    );
-    Ok(())
-}
-
-fn expand_children(
-    mapping: &mut Mapping,
-    assets: &AssetDatabase,
-    stack: &mut Vec<PathBuf>,
-) -> Result<()> {
-    let Some(children) = mapping.get_mut(Value::String("children".to_owned())) else {
-        return Ok(());
-    };
-    let children = children
-        .as_sequence_mut()
-        .ok_or_else(|| anyhow!("game object children must be a sequence"))?;
-    for child in children {
-        expand_game_object(child, assets, stack)?;
-    }
-    Ok(())
-}
-
-fn scene_with_root(root: Value) -> Value {
-    let mut scene = Mapping::new();
-    scene.insert(Value::String("root".to_owned()), root);
-    Value::Mapping(scene)
-}
+pub use engine::assets::Prefab;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::asset_database::AssetDatabase;
     use crate::asset_database::file_nonce;
+    use engine::ecs::{ComponentRegistry, Scene};
+    use serde_yaml::Value;
     use std::fs;
+    use std::path::PathBuf;
 
     fn temp_dir() -> PathBuf {
         let directory = std::env::temp_dir().join(format!(
@@ -256,7 +61,7 @@ root:
         )
         .unwrap();
 
-        let assets = AssetDatabase::scan(&root).unwrap();
+        let mut assets = AssetDatabase::scan(&root).unwrap();
         let prefab = assets.load_prefab("SportsCar").unwrap();
         assert_eq!(prefab.root["name"].as_str(), Some("SportsCar"));
         assert_eq!(

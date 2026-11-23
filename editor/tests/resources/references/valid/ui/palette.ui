@@ -1,0 +1,8 @@
+<Canvas id="palette">
+    <Reference key="landscape" type="prefab" name="main"/>
+    <Reference key="ground" type="data" name="TerrainLayer/Ground"/>
+    <List id="foliage" template="row"/>
+    <Table id="layers" template="ui/templates/cell.ui"/>
+    <Include src="included.ui"/>
+    <Include src="included_list.ui" id="overridden-list" template="cell"/>
+</Canvas>

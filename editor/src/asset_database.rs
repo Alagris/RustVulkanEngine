@@ -1,11 +1,36 @@
 use anyhow::{Context, Result, anyhow, bail};
+use engine::assets::{AssetKind, AssetNameResolver, AssetStore, PrefabResolver};
 #[cfg(debug_assertions)]
 use engine::ecs::component::{ComponentRegistration, inventory};
 use engine::render_pipeline::{preprocess_shader_file, shader_asset_name_from_path};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
+
+impl PrefabResolver for AssetDatabase {
+    fn resolve_prefab_root(
+        &self,
+        reference: &str,
+        stack: &mut Vec<PathBuf>,
+    ) -> Result<serde_yaml::Value> {
+        AssetDatabase::resolve_prefab_root(self, reference, stack)
+    }
+}
+
+impl AssetNameResolver for AssetDatabase {
+    fn resolve_asset_name(&self, name: &str, kind: AssetKind) -> Result<PathBuf> {
+        self.resolve(&AssetRef {
+            name: name.to_owned(),
+            asset_type: match kind {
+                AssetKind::Prefab => AssetType::Prefab,
+                AssetKind::Ui => AssetType::Ui,
+                AssetKind::Data => AssetType::Data,
+            },
+        })
+        .map(Path::to_path_buf)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AssetType {
@@ -18,6 +43,7 @@ pub enum AssetType {
     Data,
     Scene,
     Prefab,
+    Ui,
 }
 
 impl AssetType {
@@ -32,6 +58,7 @@ impl AssetType {
             "data" => Some(Self::Data),
             "scene" => Some(Self::Scene),
             "prefab" => Some(Self::Prefab),
+            "ui" | "xml" => Some(Self::Ui),
             _ => None,
         }
     }
@@ -47,6 +74,7 @@ impl AssetType {
             Self::Data => "data",
             Self::Scene => "scene",
             Self::Prefab => "prefab",
+            Self::Ui => "ui",
         }
     }
 }
@@ -62,9 +90,12 @@ type AssetProcessor = Arc<dyn Fn(&Path, &Path) -> Result<()> + Send + Sync>;
 pub struct AssetDatabase {
     root: PathBuf,
     assets: BTreeMap<AssetRef, PathBuf>,
+    paths: BTreeMap<PathBuf, AssetRef>,
+    ambiguous: BTreeMap<AssetRef, Vec<PathBuf>>,
     processors: HashMap<AssetType, AssetProcessor>,
     prefab_cache: RwLock<HashMap<String, serde_yaml::Value>>,
-    data_assets: engine::data::DataAssetDatabase,
+    data_assets: OnceLock<Arc<engine::data::DataAssetDatabase>>,
+    runtime_assets: RwLock<Option<AssetStore>>,
 }
 
 impl AssetDatabase {
@@ -79,6 +110,8 @@ impl AssetDatabase {
             bail!("asset root is not a directory: {}", root.display());
         }
         let mut assets: BTreeMap<AssetRef, PathBuf> = BTreeMap::new();
+        let mut paths = BTreeMap::new();
+        let mut ambiguous: BTreeMap<AssetRef, Vec<PathBuf>> = BTreeMap::new();
         let mut pending = vec![root.clone()];
         while let Some(directory) = pending.pop() {
             for entry in fs::read_dir(&directory)
@@ -141,42 +174,33 @@ impl AssetDatabase {
                     "canonicalized asset paths must be absolute"
                 );
                 if let Some(previous) = assets.get(&key) {
-                    if asset_type == AssetType::Data {
-                        log::warn!(
-                            "Ignoring duplicate data asset '{}': {} and {}",
-                            key.name,
-                            previous.display(),
-                            path.display()
-                        );
-                        continue;
-                    }
-                    bail!(
-                        "duplicate {:?} asset name '{}': {} and {}",
-                        key.asset_type,
-                        key.name,
-                        previous.display(),
-                        path.display()
-                    );
+                    ambiguous
+                        .entry(key.clone())
+                        .or_insert_with(|| vec![previous.clone()])
+                        .push(canonical.clone());
+                } else {
+                    assets.insert(key.clone(), canonical.clone());
                 }
-                assets.insert(key, canonical);
+                paths.insert(canonical, key);
             }
         }
-        let data_assets = engine::data::DataAssetDatabase::load_dir(&root)
-            .with_context(|| format!("Failed to load data assets from {}", root.display()))?;
         let database = Self {
             root,
             assets,
+            paths,
+            ambiguous,
             processors: HashMap::new(),
             prefab_cache: RwLock::new(HashMap::new()),
-            data_assets,
+            data_assets: OnceLock::new(),
+            runtime_assets: RwLock::new(None),
         };
         let yaml_assets = database
-            .assets
+            .paths
             .iter()
-            .filter(|(reference, _)| {
+            .filter(|(_, reference)| {
                 matches!(reference.asset_type, AssetType::Scene | AssetType::Prefab)
             })
-            .map(|(reference, path)| (reference.clone(), path.clone()))
+            .map(|(path, reference)| (reference.clone(), path.clone()))
             .collect::<Vec<_>>();
         for (reference, path) in yaml_assets {
             let document = read_yaml(&path)?;
@@ -188,15 +212,37 @@ impl AssetDatabase {
                     scene
                 }
                 AssetType::Prefab => {
-                    let prefab = crate::prefab::Prefab::load(&reference.name, &database)
+                    let root = database
+                        .resolve_prefab_root(
+                            path.to_str()
+                                .ok_or_else(|| anyhow!("asset path is not UTF-8"))?,
+                            &mut Vec::new(),
+                        )
                         .with_context(|| format!("Invalid prefab {}", path.display()))?;
-                    scene_document_with_root(prefab.root)
+                    scene_document_with_root(root)
                 }
                 _ => unreachable!("only scene and prefab YAML assets are selected"),
             };
             #[cfg(debug_assertions)]
             validate_component_constraints(&_expanded)
                 .with_context(|| format!("Invalid component constraints in {}", path.display()))?;
+        }
+        let runtime_assets = AssetStore::load_development(&database.root, &database)?;
+        assert!(
+            database
+                .data_assets
+                .set(runtime_assets.data_assets_handle())
+                .is_ok(),
+            "data assets must be initialized once"
+        );
+        *database
+            .runtime_assets
+            .write()
+            .map_err(|_| anyhow!("runtime asset lock was poisoned"))? = Some(runtime_assets);
+        for (path, reference) in &database.paths {
+            if reference.asset_type == AssetType::Scene {
+                database.expanded_scene_yaml(path)?;
+            }
         }
         Ok(database)
     }
@@ -206,14 +252,57 @@ impl AssetDatabase {
     }
 
     pub fn data_assets(&self) -> &engine::data::DataAssetDatabase {
-        &self.data_assets
+        self.data_assets.get().expect("initialized asset database")
     }
 
     pub fn assets(&self) -> impl Iterator<Item = (&AssetRef, &PathBuf)> {
-        self.assets.iter()
+        self.paths.iter().map(|(path, reference)| (reference, path))
     }
 
     pub fn resolve(&self, reference: &AssetRef) -> Result<&Path> {
+        let candidate = Path::new(&reference.name);
+        if candidate
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .and_then(AssetType::from_extension)
+            == Some(reference.asset_type)
+        {
+            let path = if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                self.root.join(candidate)
+            };
+            let path = path
+                .canonicalize()
+                .with_context(|| format!("Failed to resolve asset path {}", path.display()))?;
+            if !path.starts_with(&self.root) {
+                bail!("asset path is outside {}", self.root.display());
+            }
+            return self
+                .paths
+                .get_key_value(&path)
+                .filter(|(_, key)| key.asset_type == reference.asset_type)
+                .map(|(path, _)| path.as_path())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "asset path '{}' was not indexed with type {:?}",
+                        reference.name,
+                        reference.asset_type
+                    )
+                });
+        }
+        if let Some(paths) = self.ambiguous.get(reference) {
+            bail!(
+                "ambiguous {:?} asset name '{}': {}; use an asset-relative path",
+                reference.asset_type,
+                reference.name,
+                paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         self.assets
             .get(reference)
             .map(PathBuf::as_path)
@@ -228,14 +317,48 @@ impl AssetDatabase {
     }
 
     pub fn load_prefab(&self, name: &str) -> Result<crate::prefab::Prefab> {
-        crate::prefab::Prefab::load(name, self)
+        let path = self.resolve(&AssetRef {
+            name: name.to_owned(),
+            asset_type: AssetType::Prefab,
+        })?;
+        let relative = path
+            .strip_prefix(&self.root)?
+            .to_str()
+            .ok_or_else(|| anyhow!("asset path is not UTF-8"))?;
+        self.with_runtime_assets(|assets| {
+            assets
+                .get::<engine::assets::Prefab>(relative)?
+                .with(Clone::clone)
+        })
     }
 
-    pub fn clear_prefab_cache(&self) -> Result<()> {
+    pub fn with_runtime_assets<R>(
+        &self,
+        action: impl FnOnce(&AssetStore) -> Result<R>,
+    ) -> Result<R> {
+        let guard = self
+            .runtime_assets
+            .read()
+            .map_err(|_| anyhow!("runtime asset lock was poisoned"))?;
+        action(
+            guard
+                .as_ref()
+                .ok_or_else(|| anyhow!("runtime assets have not been built"))?,
+        )
+    }
+
+    pub fn clear_prefab_cache(&mut self) -> Result<()> {
         self.prefab_cache
             .write()
             .map_err(|_| anyhow!("prefab cache lock was poisoned"))?
             .clear();
+        let assets = AssetStore::load_development(&self.root, self)?;
+        let mut runtime = self
+            .runtime_assets
+            .write()
+            .map_err(|_| anyhow!("runtime asset lock was poisoned"))?;
+        self.data_assets = OnceLock::from(assets.data_assets_handle());
+        *runtime = Some(assets);
         Ok(())
     }
 
@@ -244,25 +367,28 @@ impl AssetDatabase {
         name: &str,
         stack: &mut Vec<PathBuf>,
     ) -> Result<serde_yaml::Value> {
-        if let Some(root) = self
-            .prefab_cache
-            .read()
-            .map_err(|_| anyhow!("prefab cache lock was poisoned"))?
-            .get(name)
-            .cloned()
-        {
-            return Ok(root);
-        }
         let path = self.resolve(&AssetRef {
             name: name.to_owned(),
             asset_type: AssetType::Prefab,
         })?;
-        let root = crate::prefab::load_prefab_path(path, self, stack)?;
+        let key = path
+            .to_str()
+            .ok_or_else(|| anyhow!("asset path is not UTF-8"))?;
+        if let Some(root) = self
+            .prefab_cache
+            .read()
+            .map_err(|_| anyhow!("prefab cache lock was poisoned"))?
+            .get(key)
+            .cloned()
+        {
+            return Ok(root);
+        }
+        let root = engine::assets::load_prefab_path(path, self, stack)?;
         let mut cache = self
             .prefab_cache
             .write()
             .map_err(|_| anyhow!("prefab cache lock was poisoned"))?;
-        Ok(cache.entry(name.to_owned()).or_insert(root).clone())
+        Ok(cache.entry(key.to_owned()).or_insert(root).clone())
     }
 
     pub fn prepare_development_scene(&self, scene_path: &Path) -> Result<PathBuf> {
@@ -289,31 +415,7 @@ impl AssetDatabase {
     pub fn package_data_assets(&self, output: &Path) -> Result<PathBuf> {
         let data_output = output.join("data");
         fs::create_dir_all(&data_output)?;
-        for source in self
-            .assets
-            .iter()
-            .filter(|(reference, _)| reference.asset_type == AssetType::Data)
-            .map(|(_, source)| source)
-        {
-            let relative = source
-                .strip_prefix(&self.root)
-                .with_context(|| format!("data asset is outside {}", self.root.display()))?;
-            let destination = data_output.join(relative);
-            if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::copy(source, &destination).with_context(|| {
-                format!(
-                    "Failed to package data asset {} to {}",
-                    source.display(),
-                    destination.display()
-                )
-            })?;
-            assert!(
-                destination.is_file(),
-                "packaged data asset must exist after copying"
-            );
-        }
+        self.with_runtime_assets(|assets| assets.package(&data_output))?;
         Ok(PathBuf::from("data"))
     }
 
@@ -375,9 +477,13 @@ impl AssetDatabase {
                 serde_yaml::Value::String("shader".to_owned()),
                 serde_yaml::Value::String(shader_path.display().to_string()),
             );
-            let material_output = output
-                .join("materials")
-                .join(format!("{}.mat", material_name));
+            let material_output =
+                output.join(self.packaged_asset_path(material_name, AssetType::Material)?);
+            fs::create_dir_all(
+                material_output
+                    .parent()
+                    .ok_or_else(|| anyhow!("material output has no parent"))?,
+            )?;
             fs::write(&material_output, serde_yaml::to_string(&material_value)?)
                 .with_context(|| format!("Failed to write {}", material_output.display()))?;
             pass.as_mapping_mut()
@@ -450,7 +556,11 @@ impl AssetDatabase {
                 .ok_or_else(|| anyhow!("pipeline pass must be a mapping"))?
                 .insert(
                     serde_yaml::Value::String("material".to_owned()),
-                    serde_yaml::Value::String(format!("materials/{name}.mat")),
+                    serde_yaml::Value::String(
+                        self.packaged_asset_path(&name, AssetType::Material)?
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                    ),
                 );
         }
 
@@ -490,19 +600,35 @@ impl AssetDatabase {
                     .ok_or_else(|| {
                         anyhow!("{} material must name a shader asset", source.display())
                     })?;
+                let material_relative =
+                    self.packaged_asset_path(material_name, AssetType::Material)?;
+                let shader_relative = self.packaged_asset_path(shader_name, AssetType::Shader)?;
+                let depth = material_relative
+                    .parent()
+                    .ok_or_else(|| anyhow!("material output has no parent"))?
+                    .components()
+                    .count();
+                let shader_link = format!(
+                    "{}{}",
+                    "../".repeat(depth),
+                    shader_relative.to_string_lossy().replace('\\', "/")
+                );
                 material_table.insert(
                     serde_yaml::Value::String("shader".to_owned()),
-                    serde_yaml::Value::String(format!("../shaders/{shader_name}.shader")),
+                    serde_yaml::Value::String(shader_link),
                 );
-                let staged_material = stage.join(format!("{material_name}.mat"));
+                let staged_material = stage.join(&material_relative);
+                fs::create_dir_all(
+                    staged_material
+                        .parent()
+                        .ok_or_else(|| anyhow!("staged material has no parent"))?,
+                )?;
                 fs::write(&staged_material, serde_yaml::to_string(&value)?)
                     .with_context(|| format!("Failed to stage {}", source.display()))?;
                 self.process(
                     AssetType::Material,
                     &staged_material,
-                    &output
-                        .join("materials")
-                        .join(format!("{material_name}.mat")),
+                    &output.join(material_relative),
                 )?;
             }
 
@@ -512,13 +638,19 @@ impl AssetDatabase {
                     asset_type: AssetType::Shader,
                 })?;
                 let expanded_shader = preprocess_shader_file(source)?;
-                let staged_shader = stage.join(format!("{shader_name}.shader"));
+                let shader_relative = self.packaged_asset_path(shader_name, AssetType::Shader)?;
+                let staged_shader = stage.join(&shader_relative);
+                fs::create_dir_all(
+                    staged_shader
+                        .parent()
+                        .ok_or_else(|| anyhow!("staged shader has no parent"))?,
+                )?;
                 fs::write(&staged_shader, expanded_shader)
                     .with_context(|| format!("Failed to stage shader {}", source.display()))?;
                 self.process(
                     AssetType::Shader,
                     &staged_shader,
-                    &output.join("shaders").join(format!("{shader_name}.shader")),
+                    &output.join(shader_relative),
                 )?;
             }
             Ok(output.join(pipeline_name))
@@ -545,12 +677,45 @@ impl AssetDatabase {
         let mut scene = read_yaml(scene_path)?;
         crate::prefab::Prefab::expand_scene(&mut scene, self)
             .with_context(|| format!("Failed to expand prefabs in {}", scene_path.display()))?;
+        self.with_runtime_assets(|assets| assets.resolve_value(&mut scene, self))
+            .with_context(|| format!("Invalid asset references in {}", scene_path.display()))?;
         serde_yaml::to_string(&scene).with_context(|| {
             format!(
                 "Failed to serialize expanded scene {}",
                 scene_path.display()
             )
         })
+    }
+
+    fn packaged_asset_path(&self, name: &str, asset_type: AssetType) -> Result<PathBuf> {
+        let directory = match asset_type {
+            AssetType::Material => "materials",
+            AssetType::Shader => "shaders",
+            _ => bail!("unsupported packaged dependency type {asset_type:?}"),
+        };
+        let source = self.resolve(&AssetRef {
+            name: name.to_owned(),
+            asset_type,
+        })?;
+        let explicit = Path::new(name)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .and_then(AssetType::from_extension)
+            == Some(asset_type);
+        let relative = if explicit {
+            source.strip_prefix(&self.root)?.to_path_buf()
+        } else {
+            PathBuf::from(format!("{name}.{}", asset_type.extension()))
+        };
+        if relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            bail!(
+                "packaged asset name '{name}' must not contain absolute or parent-directory components"
+            );
+        }
+        Ok(Path::new(directory).join(relative))
     }
 
     pub(crate) fn process_scene(&self, source: &Path, destination: &Path) -> Result<()> {
@@ -882,7 +1047,7 @@ passes:
     }
 
     #[test]
-    fn scans_and_instantiates_typed_data_assets_and_ignores_duplicate_names() {
+    fn duplicate_data_names_require_explicit_paths() {
         let root = temp_dir("data-assets");
         fs::write(
             root.join("first.data"),
@@ -904,7 +1069,19 @@ passes:
         assert!(
             database
                 .data_assets()
-                .get::<engine::input::Input>("Shared")
+                .try_get::<engine::input::Input>("Shared")
+                .is_err()
+        );
+        assert!(
+            database
+                .data_assets()
+                .get::<engine::input::Input>("first.data")
+                .is_some()
+        );
+        assert!(
+            database
+                .data_assets()
+                .get::<engine::input::Input>("duplicate.data")
                 .is_some()
         );
         assert!(
@@ -918,25 +1095,45 @@ passes:
                 .assets()
                 .filter(|(reference, _)| reference.asset_type == AssetType::Data)
                 .count(),
-            2
+            3
         );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn rejects_duplicate_names_within_an_asset_type() {
+    fn ambiguous_names_can_be_resolved_by_path() {
         let root = temp_dir("duplicate");
         fs::create_dir_all(root.join("first")).unwrap();
         fs::create_dir_all(root.join("second")).unwrap();
         let shader = r#"shader "Shared" { pass "Main" { face "back" queue "opaque" hlsl { struct VertexInput { float3 p : POSITION; }; } } }"#;
         fs::write(root.join("first").join("shared.shader"), shader).unwrap();
         fs::write(root.join("second").join("shared.shader"), shader).unwrap();
+        let database = AssetDatabase::scan(&root).unwrap();
         assert!(
-            AssetDatabase::scan(&root)
-                .err()
-                .unwrap()
+            database
+                .resolve(&AssetRef {
+                    name: "Shared".into(),
+                    asset_type: AssetType::Shader
+                })
+                .unwrap_err()
                 .to_string()
-                .contains("duplicate Shader")
+                .contains("ambiguous Shader")
+        );
+        assert!(
+            database
+                .resolve(&AssetRef {
+                    name: "first/shared.shader".into(),
+                    asset_type: AssetType::Shader
+                })
+                .is_ok()
+        );
+        assert!(
+            database
+                .resolve(&AssetRef {
+                    name: "second/shared.shader".into(),
+                    asset_type: AssetType::Shader
+                })
+                .is_ok()
         );
         fs::remove_dir_all(root).unwrap();
     }

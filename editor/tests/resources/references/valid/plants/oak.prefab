@@ -1,0 +1,4 @@
+root:
+  name: Oak
+  references:
+    palette: {asset: {type: ui, path: ui/palette.ui}}

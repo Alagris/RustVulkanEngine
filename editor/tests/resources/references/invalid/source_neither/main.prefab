@@ -1,0 +1,4 @@
+root:
+  name: MissingSource
+  references:
+    self: {asset: {type: prefab}}

@@ -1,0 +1,4 @@
+root:
+  name: EscapingPath
+  references:
+    tree: {asset: {type: prefab, path: ../outside.prefab}}

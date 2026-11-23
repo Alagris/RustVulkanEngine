@@ -1,0 +1,4 @@
+root:
+  name: ConflictingSource
+  references:
+    self: {asset: {type: prefab, path: main.prefab, name: main}}

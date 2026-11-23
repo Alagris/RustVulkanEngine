@@ -1,0 +1,6 @@
+root:
+  name: AmbiguousTree
+  components:
+    - type: Foliage
+      data:
+        prefabs: [{asset: {type: prefab, name: pine}}]

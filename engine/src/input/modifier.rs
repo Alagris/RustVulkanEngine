@@ -1,11 +1,10 @@
 use crate::data::data_asset::{
-    DataAsset, DataAssetCell, DataAssetDeserializeContext, DataAssetTarget,
+    DataAsset, DataAssetCell, DataAssetDeserializeContext, DataAssetLink, DataAssetTarget,
 };
 use crate::input::input_type::InputType;
 use anyhow::{Result, anyhow, bail};
 use glam::{Vec2, Vec3};
 use serde_yaml::Value;
-use std::sync::Arc;
 
 pub trait Modifier: DataAsset {
     fn input_type(&self) -> InputType;
@@ -45,15 +44,17 @@ impl DataAssetTarget for dyn Modifier {
         None
     }
 
-    fn cast<'a>(asset: &'a dyn DataAsset, cell: &'a DataAssetCell) -> Option<&'a Self> {
-        (registration(cell.registration.type_name)?.cast)(asset)
+    fn cast<'a>(asset: &'a dyn DataAsset, type_name: &str) -> Option<&'a Self> {
+        (registration(type_name)?.cast)(asset)
     }
 
     fn resolve_link(
         context: &DataAssetDeserializeContext,
         name: &str,
         type_name: Option<&str>,
-    ) -> Result<(Arc<DataAssetCell>, String, String)> {
+    ) -> Result<DataAssetLink> {
+        let name = context.reference_name(name)?;
+        let name = name.as_str();
         let type_name = match type_name {
             Some(type_name) => {
                 if registration(type_name).is_none() {
@@ -81,7 +82,7 @@ impl DataAssetTarget for dyn Modifier {
         context: &DataAssetDeserializeContext,
         type_name: Option<&str>,
         value: Value,
-    ) -> Result<Arc<DataAssetCell>> {
+    ) -> Result<Box<DataAssetCell>> {
         let type_name = type_name
             .ok_or_else(|| anyhow!("nested modifier data assets must specify a 'type'"))?;
         let registration = registration(type_name)

@@ -17,4 +17,6 @@ pub struct ListStyle {
 #[element(style = ListStyle, layout)]
 #[derive(Clone, Debug, Default, Deserialize, Element)]
 #[serde(deny_unknown_fields)]
-pub struct List {}
+pub struct List {
+    pub template: Option<crate::assets::UiDocumentRef>,
+}

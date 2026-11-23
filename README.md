@@ -25,8 +25,8 @@ The workspace includes `engine` (graphics API and runtime), `component_macros`,
 `editor`, `game`, the vendored PhysX bindings (`physx` and `physx-sys`), the
 `physx-safe` engine-facing wrapper, and the upstream `pxbind` binding generator.
 The game project loads `game/assets/pipeline.pipe`; the editor resolves
-`(asset name, asset type)` references to absolute development paths before the
-engine sees them. HLSL is compiled into SPIR-V through the embedded `shaderc`
+authoring names into rendering paths and reusable weak asset references before
+runtime startup. HLSL is compiled into SPIR-V through the embedded `shaderc`
 crate without launching an external compiler. The sample renders a parametric
 cube and segmented plane, including cascaded cube shadows on the plane.
 
@@ -54,7 +54,8 @@ cargo run -p editor -- package game\settings.yaml build\release
 ```
 
 Run a packaged pipeline directly (the engine reads the paths emitted by the
-editor and does not rescan or resolve assets):
+editor; reusable prefab/UI/data assets are loaded by path without editor name
+resolution):
 
 ```powershell
 cargo run -p game -- --release --settings build\release\runtime_settings.yaml
@@ -293,6 +294,101 @@ Parents own their child objects directly. `GameObject::weak_reference` creates
 a non-owning handle that can be resolved through `Scene::resolve_game_object`;
 the scene prunes expired object handles during update.
 
+### Runtime asset references
+
+`engine::assets::Prefab` is available without the editor. `AssetStore::load`
+loads reusable `.prefab`, `.ui`/`.xml`, and `.data` files from an asset directory
+using **asset-root-relative paths only**, even in debug builds.
+`AssetStore::load_development` additionally accepts an authoring-time
+`AssetNameResolver`; the editor supplies its `AssetDatabase`. Ambiguous names
+are errors, not an arbitrary first match. Explicit paths disambiguate duplicate
+prefab, UI, and data asset names.
+
+Keep the owning `AssetStore` (or editor `AssetDatabase`) alive while using its
+assets. `PrefabRef`, `UiDocumentRef`, and dynamically typed `AssetReference`
+are weak handles; `with` reports expired or incorrectly typed targets.
+`AssetReference::typed` checks the requested asset kind. Typed `DataRef<T>`
+continues to distinguish weak external links from owned inline data assets.
+Weak cycles are valid; prefab inheritance/instancing cycles and UI Include
+cycles are not.
+
+The data database uniquely owns boxed `DataAssetCell`s; an inline `DataRef<T>`
+uniquely owns its own boxed cell. Linked `DataRef<T>`s contain only a checked
+weak handle, with no duplicated name/type strings. Cells retain their identity
+and value, not factory registrations. The private handle control block permits
+temporary read leases so dropping an owner inside or during a callback cannot
+invalidate that callback's borrow. It does not expose shared ownership, and
+new accesses expire when the unique owner is dropped. Serializing an expired
+link is an error because its identity is no longer available.
+
+Game objects accept named injected references without eagerly instantiating
+the targets. Component fields can use typed handles directly:
+
+```yaml
+root:
+  name: Landscape
+  references:
+    panel: {asset: {type: ui, path: ui/palette.ui}}
+    layer: {asset: {type: data, name: TerrainLayer/Ground}}
+  components:
+    - type: Foliage
+      data:
+        prefabs:
+          - {asset: {type: prefab, name: oak}}
+          - {asset: {type: prefab, path: plants/pine.prefab}}
+    - type: Terrain
+      data:
+        layer: {ref: Ground, type: TerrainLayer}
+```
+
+An `asset` wrapper accepts exactly one `path` or development-only `name`, and
+one `type` (`prefab`, `ui`, or `data`). Data names use `ConcreteType/Name` in
+these wrappers; typed `DataRef<T>` fields use `{ref: Name}` or
+`{ref: layers/ground.data}`, with an optional concrete `type` discriminator.
+When a bare data name is ambiguous across types, include that discriminator
+or use a path. Prefab `parent` and eager `prefab` instances also accept names
+in development or paths in both environments. Prefab/UI references can be
+instantiated repeatedly without consulting the editor or their source files.
+
+UI metadata uses the same weak references. List and Table have a typed,
+optional `UiDocumentRef` template, separate from ordinary child elements:
+
+```xml
+<Canvas>
+  <Reference key="tree" type="prefab" path="plants/oak.prefab"/>
+  <List id="foliage" template="row"/>
+  <Table id="layers" template="ui/templates/cell.ui"/>
+</Canvas>
+```
+
+`Document::references(id)` exposes metadata for an element; `Reference` is not
+a rendered child. Template names are development-only, while template paths
+are relative to the asset root. Unlike weak references, Include paths are
+relative to the containing document and eagerly copy its tree. Includes loaded
+through an asset store must stay within its asset directory.
+
+Use `AssetStore::get::<Prefab>(path)` followed by
+`reference.with(|prefab| prefab.instantiate(scene, registry))`, or
+`UiDocument::instantiate` for an independent UI tree. `AssetStore::load_scene`
+loads prepared scenes with both asset-reference and data-reference contexts;
+relative scene paths are rooted at the asset directory.
+`AssetStore::with` supplies the same scoped context for custom deserialization
+or dynamic template attribute changes. The pure-code API can assign an
+already-resolved handle directly to `List::template` or `Table::template`.
+
+The editor resolves authoring names before returning prefab templates or
+preparing scenes. Development preparation and release packaging export
+flattened, path-only prefab/UI/data files under the runtime `data_assets`
+directory; `input_asset` is an asset-relative `.data` path in generated runtime
+settings. Release loading never performs name lookup. Clearing the editor
+prefab cache requires mutable access and rebuilds the matching data/UI store;
+old weak handles expire.
+
+`Foliage`, `Terrain`, and `TerrainLayer` are deliberately dummy asset-wiring
+types. Scattering, terrain generation/rendering, automatic hot reload, and
+List/Table virtualization remain unimplemented. UI layout work is deferred
+until after this reference mechanism.
+
 ### UI documents and styles
 
 `engine::ui` provides a renderer-independent UI document tree for both games
@@ -506,3 +602,12 @@ deeply nested asset roots (`deep_nesting`), data asset parent chains
 messages produced for cyclic prefabs, duplicate assets, malformed scenes,
 unregistered data asset types, missing materials/shaders, and invalid project
 settings.
+
+`editor/tests/resources/references` adds component and UI reference fixtures:
+Foliage prefab lists, linked and inline terrain layers, inheritance, weak
+cycles, document Includes, List/Table row/cell templates, and duplicate names
+resolved by path. `editor/tests/asset_references.rs` checks these, weak-handle
+expiry, cache rebuilding, and engine-only loading after deleting the original
+source directory. Its 23 negative fixture directories each carry an
+`expected_error.txt`; the test verifies both the diagnostic and the total case
+count so missing fixture directories cannot pass vacuously.

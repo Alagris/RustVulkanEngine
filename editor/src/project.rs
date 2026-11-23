@@ -109,11 +109,17 @@ impl Project {
         let default_scene = self
             .assets
             .prepare_development_scene(&self.settings.runtime.default_scene)?;
+        let asset_root = default_scene
+            .parent()
+            .ok_or_else(|| anyhow!("prepared scene has no parent"))?
+            .join("assets");
+        self.assets
+            .with_runtime_assets(|assets| assets.package(&asset_root))?;
         Ok(RuntimeSettings {
             pipeline,
             default_scene,
-            data_assets: Some(self.assets.root().to_path_buf()),
-            input_asset: self.settings.runtime.input_asset.clone(),
+            data_assets: Some(asset_root),
+            input_asset: self.resolved_input_asset()?,
             active_input_map: self.settings.runtime.active_input_map.clone(),
         })
     }
@@ -153,7 +159,7 @@ impl Project {
                 .ok_or_else(|| anyhow!("packaged pipeline path has no filename"))?,
             default_scene: scene_relative,
             data_assets: Some(data_assets),
-            input_asset: self.settings.runtime.input_asset.clone(),
+            input_asset: self.resolved_input_asset()?,
             active_input_map: self.settings.runtime.active_input_map.clone(),
         };
         let runtime_settings_path = output.join("runtime_settings.yaml");
@@ -170,6 +176,30 @@ impl Project {
             name: name.to_owned(),
             asset_type,
         })
+    }
+
+    fn resolved_input_asset(&self) -> Result<Option<String>> {
+        self.settings
+            .runtime
+            .input_asset
+            .as_deref()
+            .map(|reference| {
+                let name = if Path::new(reference).extension().is_some() {
+                    reference.to_owned()
+                } else {
+                    format!("Input/{reference}")
+                };
+                let path = self.assets.resolve(&AssetRef {
+                    name,
+                    asset_type: AssetType::Data,
+                })?;
+                Ok(path
+                    .strip_prefix(self.assets.root())?
+                    .to_str()
+                    .ok_or_else(|| anyhow!("input asset path must be UTF-8"))?
+                    .replace('\\', "/"))
+            })
+            .transpose()
     }
 
     pub fn development_settings_path(&self) -> Result<PathBuf> {
@@ -213,7 +243,14 @@ fn resolve_setting_asset(
     }
     let resolved = assets
         .resolve(&AssetRef {
-            name: name.to_owned(),
+            name: if setting.components().count() > 1 {
+                setting
+                    .to_str()
+                    .ok_or_else(|| anyhow!("settings asset path must be UTF-8"))?
+                    .to_owned()
+            } else {
+                name.to_owned()
+            },
             asset_type,
         })?
         .to_path_buf();

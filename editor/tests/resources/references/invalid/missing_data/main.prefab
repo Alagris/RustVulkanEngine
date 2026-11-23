@@ -1,0 +1,6 @@
+root:
+  name: MissingLayer
+  components:
+    - type: Terrain
+      data:
+        layer: {ref: missing.data}

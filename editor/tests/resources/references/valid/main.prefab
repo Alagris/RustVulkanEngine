@@ -1,0 +1,16 @@
+root:
+  name: Landscape
+  references:
+    palette: {asset: {type: ui, name: palette}}
+    layer: {asset: {type: data, name: TerrainLayer/Ground}}
+    self: {asset: {type: prefab, path: main.prefab}}
+  components:
+    - type: Foliage
+      data:
+        prefabs:
+          - {asset: {type: prefab, name: oak}}
+          - {asset: {type: prefab, path: plants/pine.prefab}}
+          - variants/pine.prefab
+    - type: Terrain
+      data:
+        layer: {ref: Ground, type: TerrainLayer}

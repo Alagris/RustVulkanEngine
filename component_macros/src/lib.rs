@@ -103,6 +103,16 @@ pub fn component(arguments: TokenStream, input: TokenStream) -> TokenStream {
     if derives_serde(&item.attrs) {
         attributes.push(parse_quote!(#[serde(skip)]));
     }
+    // Rust removes the active derive group before invoking individual derives.
+    let serde_derives = ["Serialize", "Deserialize"]
+        .into_iter()
+        .filter(|name| derives_trait(&item.attrs, name))
+        .map(|name| syn::Ident::new(name, proc_macro2::Span::call_site()))
+        .collect::<Vec<_>>();
+    if !serde_derives.is_empty() {
+        item.attrs
+            .push(parse_quote!(#[component_serde(#(#serde_derives),*)]));
+    }
     if arguments.serialize_with.is_some() || arguments.deserialize_with.is_some() {
         let mut factory_options = Vec::new();
         if let Some(path) = arguments.serialize_with {
@@ -164,7 +174,10 @@ impl Parse for ComponentMacroArguments {
     }
 }
 
-#[proc_macro_derive(Component, attributes(require, unique, component_factory))]
+#[proc_macro_derive(
+    Component,
+    attributes(require, unique, component_factory, component_serde)
+)]
 pub fn derive_component(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match expand_component(input) {
@@ -589,7 +602,9 @@ fn derives_serde(attributes: &[Attribute]) -> bool {
 fn derives_trait(attributes: &[Attribute], trait_name: &str) -> bool {
     attributes
         .iter()
-        .filter(|attribute| attribute.path().is_ident("derive"))
+        .filter(|attribute| {
+            attribute.path().is_ident("derive") || attribute.path().is_ident("component_serde")
+        })
         .filter_map(|attribute| {
             attribute
                 .parse_args_with(Punctuated::<Path, Token![,]>::parse_terminated)

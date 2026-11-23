@@ -1,17 +1,19 @@
 use crate::data::data_asset::{
-    DataAssetCell, DataAssetDeserializeContext, DataAssetKey, DataAssetRegistration, DataAssetType,
-    DataRef, inventory, with_context,
+    DataAssetCell, DataAssetDeserializeContext, DataAssetKey, DataAssetLink, DataAssetRegistration,
+    DataAssetType, DataRef, inventory, with_context,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use serde_yaml::{Mapping, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 pub struct DataAssetDatabase {
-    assets: HashMap<DataAssetKey, Arc<DataAssetCell>>,
-    registrations: HashMap<&'static str, &'static DataAssetRegistration>,
+    assets: HashMap<DataAssetKey, Box<DataAssetCell>>,
+    aliases: HashMap<DataAssetKey, Vec<DataAssetKey>>,
+    awake: Vec<DataAssetLink>,
+    pub(crate) context: Arc<DataAssetDeserializeContext>,
 }
 
 impl DataAssetDatabase {
@@ -59,6 +61,103 @@ impl DataAssetDatabase {
     }
 
     pub fn from_documents(documents: Vec<(String, Value, PathBuf)>) -> Result<Self> {
+        let database = Self::from_documents_with_aliases(documents, HashMap::new(), false, true)?;
+        database.awake_assets()?;
+        Ok(database)
+    }
+
+    pub(crate) fn from_path_documents(
+        mut documents: Vec<(String, Value, PathBuf)>,
+        development: bool,
+    ) -> Result<Self> {
+        let mut aliases: HashMap<DataAssetKey, Vec<DataAssetKey>> = HashMap::new();
+        for (path, value, _) in &documents {
+            let type_name = value
+                .get("type")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("data asset '{path}' requires a type"))?;
+            let name = value
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| {
+                    Path::new(path)
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .unwrap_or(path)
+                });
+            aliases
+                .entry(DataAssetKey {
+                    type_name: type_name.to_owned(),
+                    name: name.to_owned(),
+                })
+                .or_default()
+                .push(DataAssetKey {
+                    type_name: type_name.to_owned(),
+                    name: path.to_owned(),
+                });
+        }
+        for (path, value, _) in &mut documents {
+            let type_name = value["type"]
+                .as_str()
+                .expect("validated data type")
+                .to_owned();
+            let mapping = value
+                .as_mapping_mut()
+                .ok_or_else(|| anyhow!("data asset '{path}' must be a mapping"))?;
+            mapping.insert(Value::String("name".into()), Value::String(path.clone()));
+            if let Some(parent) = mapping.get_mut("parent") {
+                let reference = parent
+                    .as_str()
+                    .or_else(|| parent.get("ref").and_then(Value::as_str))
+                    .ok_or_else(|| anyhow!("invalid data asset parent in '{path}'"))?;
+                let is_path = reference.to_ascii_lowercase().ends_with(".data")
+                    || reference.contains('/')
+                    || reference.contains('\\');
+                let resolved = if is_path {
+                    crate::assets::asset_ref::normalized_path(reference)?
+                } else if development {
+                    let candidates = aliases
+                        .get(&DataAssetKey {
+                            type_name,
+                            name: reference.to_owned(),
+                        })
+                        .ok_or_else(|| anyhow!("parent data asset '{reference}' was not found"))?;
+                    if candidates.len() != 1 {
+                        bail!("ambiguous parent data asset '{reference}'; use a path");
+                    }
+                    candidates[0].name.clone()
+                } else {
+                    bail!(
+                        "data asset name references are development-only; parent '{reference}' requires a path"
+                    );
+                };
+                *parent = Value::String(resolved);
+            }
+        }
+        Self::from_documents_with_aliases(
+            documents,
+            if development { aliases } else { HashMap::new() },
+            true,
+            development,
+        )
+    }
+
+    pub(crate) fn cell_by_path(&self, path: &str, type_name: &str) -> Result<DataAssetLink> {
+        self.assets
+            .get(&DataAssetKey {
+                name: path.to_owned(),
+                type_name: type_name.to_owned(),
+            })
+            .map(|cell| cell.link())
+            .ok_or_else(|| anyhow!("data asset '{path}' of type '{type_name}' was not found"))
+    }
+
+    fn from_documents_with_aliases(
+        documents: Vec<(String, Value, PathBuf)>,
+        aliases: HashMap<DataAssetKey, Vec<DataAssetKey>>,
+        path_keys: bool,
+        allow_names: bool,
+    ) -> Result<Self> {
         let registrations = collect_registrations()?;
         let mut parsed = HashMap::new();
         for (fallback_name, document, path) in documents {
@@ -98,27 +197,30 @@ impl DataAssetDatabase {
                 let registration = registrations[key.type_name.as_str()];
                 (
                     key.clone(),
-                    Arc::new(DataAssetCell::new(
+                    Box::new(DataAssetCell::new(
                         Some(document.name.clone()),
-                        registration,
+                        registration.type_name,
                     )),
                 )
             })
             .collect::<HashMap<_, _>>();
         let weak_assets = assets
             .iter()
-            .map(|(key, cell)| (key.clone(), Arc::downgrade(cell)))
-            .collect::<HashMap<_, Weak<_>>>();
+            .map(|(key, cell)| (key.clone(), cell.link()))
+            .collect::<HashMap<_, _>>();
         let context = Arc::new(DataAssetDeserializeContext::new(
-            registrations.clone(),
+            registrations,
             weak_assets,
+            aliases.clone(),
+            path_keys,
+            allow_names,
         ));
 
         for (key, cell) in &assets {
             let data = resolved
                 .get(key)
                 .ok_or_else(|| anyhow!("resolved data asset '{}' is missing", key.name))?;
-            let registration = registrations[key.type_name.as_str()];
+            let registration = context.registration(&key.type_name)?;
             let asset = with_context(Arc::clone(&context), || {
                 (registration.factory)(data, &context).with_context(|| {
                     format!(
@@ -130,33 +232,94 @@ impl DataAssetDatabase {
             cell.set(asset)?;
         }
 
-        let database = Self {
+        let mut awake = assets.values().map(|cell| cell.link()).collect::<Vec<_>>();
+        awake.extend(context.nested_assets()?);
+        Ok(Self {
             assets,
-            registrations,
-        };
-        let mut awake_assets = database.assets.values().cloned().collect::<Vec<_>>();
-        awake_assets.extend(context.nested_assets()?);
-        for cell in awake_assets {
-            let asset = cell
-                .asset()
-                .ok_or_else(|| anyhow!("data asset cell was not initialized"))?;
-            asset.awake(&database)?;
-        }
+            aliases,
+            awake,
+            context,
+        })
+    }
 
-        Ok(database)
+    pub(crate) fn awake_assets(&self) -> Result<()> {
+        for cell in &self.awake {
+            cell.with_value(|cell| {
+                let asset = cell
+                    .asset()
+                    .ok_or_else(|| anyhow!("data asset cell was not initialized"))?;
+                asset.awake(self)
+            })
+            .ok_or_else(|| anyhow!("data asset expired before awakening"))??;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn resolve_reference_path(
+        &self,
+        reference: &str,
+        type_name: Option<&str>,
+    ) -> Result<String> {
+        let reference = self.context.reference_name(reference)?;
+        let mut candidates = self
+            .assets
+            .keys()
+            .filter(|key| {
+                key.name == reference && type_name.is_none_or(|name| name == key.type_name)
+            })
+            .map(|key| key.name.clone())
+            .collect::<Vec<_>>();
+        for (alias, keys) in &self.aliases {
+            if alias.name == reference && type_name.is_none_or(|name| name == alias.type_name) {
+                candidates.extend(keys.iter().map(|key| key.name.clone()));
+            }
+        }
+        candidates.sort();
+        candidates.dedup();
+        let type_description = type_name
+            .map(|name| format!(" of type '{name}'"))
+            .unwrap_or_default();
+        match candidates.as_slice() {
+            [path] => Ok(path.clone()),
+            [] => bail!(
+                "data asset '{reference}'{type_description} was not found; names are development-only, use an asset-relative .data path"
+            ),
+            _ => bail!("ambiguous data asset '{reference}'; specify its type or use a path"),
+        }
     }
 
     pub fn get<T: DataAssetType>(&self, name: &str) -> Option<DataRef<T>> {
-        let key = DataAssetKey {
+        match self.try_get(name) {
+            Ok(reference) => reference,
+            Err(error) => {
+                log::error!("Failed to resolve data asset: {error:#}");
+                None
+            }
+        }
+    }
+
+    pub fn try_get<T: DataAssetType>(&self, name: &str) -> Result<Option<DataRef<T>>> {
+        let name = self.context.reference_name(name)?;
+        let mut key = DataAssetKey {
             type_name: T::TYPE_NAME.to_owned(),
-            name: name.to_owned(),
+            name: name.clone(),
         };
-        let cell = self.assets.get(&key)?;
-        Some(DataRef::linked(
-            Arc::clone(cell),
-            name.to_owned(),
-            T::TYPE_NAME.to_owned(),
-        ))
+        if !self.assets.contains_key(&key)
+            && let Some(candidates) = self.aliases.get(&key)
+        {
+            if candidates.len() != 1 {
+                bail!(
+                    "ambiguous data asset '{}' of type '{}'; use a path",
+                    name,
+                    T::TYPE_NAME
+                );
+            }
+            key = candidates[0].clone();
+        }
+        let Some(cell) = self.assets.get(&key) else {
+            return Ok(None);
+        };
+        Ok(Some(DataRef::linked(cell.link())))
     }
 
     pub fn get_by_name<T: DataAssetType>(&self, name: &str) -> Option<DataRef<T>> {
@@ -175,9 +338,7 @@ impl DataAssetDatabase {
     }
 
     pub fn registered_types(&self) -> Vec<&'static str> {
-        let mut types = self.registrations.keys().copied().collect::<Vec<_>>();
-        types.sort_unstable();
-        types
+        self.context.registered_types()
     }
 }
 
@@ -292,6 +453,7 @@ mod tests {
     use crate::data::data_asset::{DataAsset, DataAssetDeserializeContext, DataRef};
     use component_macros::DataAsset;
     use serde::{Deserialize, Serialize};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(DataAsset, Debug, Deserialize, Serialize)]
     struct TestAsset {
@@ -300,6 +462,27 @@ mod tests {
         link: Option<DataRef<TestAsset>>,
         #[serde(default)]
         nested: Option<DataRef<TestAsset>>,
+    }
+
+    #[derive(DataAsset, Debug, Deserialize, Serialize)]
+    struct LifetimeAsset {
+        value: u32,
+        #[serde(default)]
+        link: Option<DataRef<LifetimeAsset>>,
+        #[serde(default)]
+        nested: Option<DataRef<LifetimeAsset>>,
+        #[serde(skip)]
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for LifetimeAsset {
+        fn drop(&mut self) {
+            assert_eq!(
+                self.drops.fetch_add(1, Ordering::SeqCst),
+                0,
+                "data asset must be destroyed exactly once"
+            );
+        }
     }
 
     #[derive(DataAsset, Debug, Serialize)]
@@ -379,6 +562,153 @@ mod tests {
                 .with(|asset| asset.value.clone()),
             Some("inherited".to_owned())
         );
+    }
+
+    #[test]
+    fn cyclic_links_and_nested_owners_are_destroyed_without_leaks() {
+        let database = DataAssetDatabase::from_documents(vec![
+            document("type: LifetimeAsset\nname: A\ndata: {value: 1, link: {ref: B}, nested: {value: 3, link: {ref: A}}}", "a.data"),
+            document("type: LifetimeAsset\nname: B\ndata: {value: 2, link: {ref: A}}", "b.data"),
+        ]).unwrap();
+        let a = database.get::<LifetimeAsset>("A").unwrap();
+        let b = database.get::<LifetimeAsset>("B").unwrap();
+        let a_drops = a.with(|asset| Arc::clone(&asset.drops)).unwrap();
+        let b_drops = b.with(|asset| Arc::clone(&asset.drops)).unwrap();
+        let nested_drops = a
+            .with(|asset| {
+                asset
+                    .nested
+                    .as_ref()
+                    .unwrap()
+                    .with(|nested| Arc::clone(&nested.drops))
+                    .unwrap()
+            })
+            .unwrap();
+        assert_eq!(
+            a.with(|asset| asset.link.as_ref().unwrap().with(|other| other.value)),
+            Some(Some(2))
+        );
+        let serialized = serde_yaml::to_value(&a).unwrap();
+        assert_eq!(serialized["ref"], "A");
+        assert_eq!(serialized["type"], "LifetimeAsset");
+        drop(database);
+        assert!(!a.is_alive());
+        assert!(!b.is_alive());
+        assert!(a.with(|_| ()).is_none());
+        for drops in [a_drops, b_drops, nested_drops] {
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+        assert!(
+            serde_yaml::to_string(&a)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot serialize expired")
+        );
+        assert!(format!("{a:?}").contains("<expired>"));
+    }
+
+    #[test]
+    fn inline_assets_are_uniquely_owned_outside_the_database() {
+        let database = DataAssetDatabase::from_documents(vec![document(
+            "type: LifetimeAsset\nname: Root\ndata: {value: 1}",
+            "root.data",
+        )])
+        .unwrap();
+        let inline: DataRef<LifetimeAsset> = with_context(Arc::clone(&database.context), || {
+            Ok(serde_yaml::from_value(serde_yaml::from_str(
+                "value: 2\nlink: {ref: Root}\nnested: {value: 3}",
+            )?)?)
+        })
+        .unwrap();
+        let drops = inline.with(|asset| Arc::clone(&asset.drops)).unwrap();
+        let nested_drops = inline
+            .with(|asset| {
+                asset
+                    .nested
+                    .as_ref()
+                    .unwrap()
+                    .with(|nested| Arc::clone(&nested.drops))
+                    .unwrap()
+            })
+            .unwrap();
+        assert!(inline.is_nested());
+        let serialized = serde_yaml::to_value(&inline).unwrap();
+        assert_eq!(serialized["type"], "LifetimeAsset");
+        assert_eq!(serialized["data"]["link"]["ref"], "Root");
+        assert_eq!(serialized["data"]["nested"]["data"]["value"], 3);
+        drop(database);
+        assert!(inline.is_alive());
+        assert_eq!(
+            inline.with(|asset| asset.link.as_ref().unwrap().is_alive()),
+            Some(false)
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(inline);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(nested_drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn dropping_the_database_inside_a_callback_expires_links_without_invalidating_the_borrow() {
+        let database = DataAssetDatabase::from_documents(vec![
+            document("type: LifetimeAsset\nname: Root\ndata: {value: 1, nested: {value: 2, link: {ref: Root}}}", "root.data"),
+        ]).unwrap();
+        let root = database.get::<LifetimeAsset>("Root").unwrap();
+        let drops = root.with(|asset| Arc::clone(&asset.drops)).unwrap();
+        let result = root.with(|asset| {
+            drop(database);
+            assert!(!root.is_alive());
+            assert!(root.with(|_| ()).is_none());
+            assert_eq!(
+                drops.load(Ordering::SeqCst),
+                0,
+                "the current callback must retain a valid borrow"
+            );
+            let nested = asset.nested.as_ref().unwrap();
+            assert!(
+                nested.is_alive(),
+                "inline assets belong to their still-borrowed parent"
+            );
+            assert_eq!(
+                nested.with(|nested| nested.link.as_ref().unwrap().is_alive()),
+                Some(false)
+            );
+            asset.value + nested.with(|nested| nested.value).unwrap()
+        });
+        assert_eq!(result, Some(3));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn concurrent_owner_destruction_waits_only_for_active_callbacks() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let database = DataAssetDatabase::from_documents(vec![document(
+            "type: LifetimeAsset\nname: Root\ndata: {value: 42}",
+            "root.data",
+        )])
+        .unwrap();
+        let root = database.get::<LifetimeAsset>("Root").unwrap();
+        let observer = database.get::<LifetimeAsset>("Root").unwrap();
+        let drops = root.with(|asset| Arc::clone(&asset.drops)).unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            root.with(|asset| {
+                entered_tx.send(()).unwrap();
+                resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                asset.value
+            })
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(database);
+        let alive = observer.is_alive();
+        let dropped_while_reading = drops.load(Ordering::SeqCst);
+        resume_tx.send(()).unwrap();
+        assert_eq!(reader.join().unwrap(), Some(42));
+        assert!(!alive);
+        assert_eq!(dropped_while_reading, 0);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 
     #[test]

@@ -1,0 +1,5 @@
+type: TerrainLayer
+name: Ground
+parent: Base
+data:
+  label: Forest floor

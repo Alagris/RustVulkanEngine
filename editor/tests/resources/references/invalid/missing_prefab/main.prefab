@@ -1,0 +1,6 @@
+root:
+  name: MissingTree
+  components:
+    - type: Foliage
+      data:
+        prefabs: [{asset: {type: prefab, path: missing.prefab}}]

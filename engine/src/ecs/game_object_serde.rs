@@ -12,6 +12,8 @@ pub(crate) struct GameObjectDefinition {
     pub(crate) components: Vec<super::scene_serde::ComponentDefinition>,
     #[serde(default)]
     pub(crate) children: Vec<GameObjectDefinition>,
+    #[serde(default)]
+    pub(crate) references: std::collections::BTreeMap<String, serde_yaml::Value>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq)]

@@ -1,0 +1,6 @@
+root:
+  name: InvalidWrapper
+  references:
+    tree:
+      asset: {type: prefab, path: main.prefab}
+      extra: true

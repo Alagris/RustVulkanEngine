@@ -1,0 +1,6 @@
+root:
+  name: AmbiguousLayer
+  components:
+    - type: Terrain
+      data:
+        layer: {ref: Ground, type: TerrainLayer}

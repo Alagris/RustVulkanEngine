@@ -32,6 +32,7 @@ static NEXT_GAME_OBJECT_ID: AtomicU64 = AtomicU64::new(1);
 pub struct GameObject {
     id: u64,
     pub name: String,
+    pub references: crate::assets::AssetReferences,
     transform: Cell<TransformDefinition>,
     parent_transform: Cell<Transform>,
     world_transform: Cell<Transform>,
@@ -52,6 +53,7 @@ impl GameObject {
         Rc::new(RefCell::new(Self {
             id: NEXT_GAME_OBJECT_ID.fetch_add(1, Ordering::Relaxed),
             name,
+            references: Default::default(),
             transform: Cell::new(transform),
             parent_transform: Cell::new(Matrix4::identity()),
             world_transform: Cell::new(

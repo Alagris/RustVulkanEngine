@@ -1,10 +1,14 @@
 use super::elem::{
     Button, Canvas, Element, Grid, Image, Label, List, Overlay, ScrollPane, Stack, Table,
 };
+use crate::assets::asset_ref::AssetSource;
+use crate::assets::{AssetReference, AssetReferences};
 use anyhow::{Context, Result, anyhow, bail};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+pub(crate) type ReferenceResolver<'a> = dyn Fn(&AssetSource) -> Result<AssetReference> + 'a;
 
 /// Stable identity within one document. Removed identities are never reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -16,6 +20,7 @@ pub(crate) struct Node {
     pub(crate) parent: Option<ElementId>,
     pub(crate) children: Vec<ElementId>,
     pub(crate) identity: u8,
+    pub(crate) references: AssetReferences,
 }
 
 /// An owned tree of UI elements, with indexes kept in sync with edits.
@@ -40,6 +45,7 @@ impl Document {
                 parent: None,
                 children: Vec::new(),
                 identity: 0,
+                references: Default::default(),
             }))],
             root: ElementId(0),
             ids: HashMap::new(),
@@ -89,6 +95,10 @@ impl Document {
         Some(&self.node(id)?.children)
     }
 
+    pub fn references(&self, id: ElementId) -> Option<&AssetReferences> {
+        Some(&self.node(id)?.references)
+    }
+
     pub fn append(
         &mut self,
         parent: ElementId,
@@ -113,6 +123,7 @@ impl Document {
             parent: Some(parent),
             children: Vec::new(),
             identity: 0,
+            references: Default::default(),
         })));
         self.nodes[parent.0]
             .as_mut()
@@ -237,26 +248,33 @@ impl Document {
     }
 
     pub fn parse(source: &str) -> Result<Self> {
-        let spec = parse_spec(source, None, &mut Vec::new())?;
+        let spec = parse_spec(source, None, &mut Vec::new(), &resolve_reference)?;
         Self::from_spec(spec)
     }
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
-        let spec = load_spec(path.as_ref(), &mut Vec::new())?;
+        let spec = load_spec(path.as_ref(), &mut Vec::new(), &resolve_reference)?;
         Self::from_spec(spec)
     }
 
-    fn from_spec(spec: Spec) -> Result<Self> {
+    pub(crate) fn from_spec(spec: Spec) -> Result<Self> {
+        let references = spec.references.clone();
         let (root, children) = spec.into_element()?;
         let mut document = Self::from_box(root)?;
+        document.nodes[0].as_mut().expect("root exists").references = references;
         fn append_all(
             document: &mut Document,
             parent: ElementId,
             children: Vec<Spec>,
         ) -> Result<()> {
             for child in children {
+                let references = child.references.clone();
                 let (element, descendants) = child.into_element()?;
                 let id = document.append_box(parent, element)?;
+                document.nodes[id.0]
+                    .as_mut()
+                    .expect("appended node exists")
+                    .references = references;
                 append_all(document, id, descendants)?;
             }
             Ok(())
@@ -335,15 +353,52 @@ fn remove_index(index: &mut HashMap<String, HashSet<ElementId>>, key: &str, id: 
     }
 }
 
-#[derive(Debug)]
-struct Spec {
+#[derive(Clone, Debug)]
+pub(crate) struct Spec {
     tag: String,
     attributes: BTreeMap<String, String>,
     text: String,
     children: Vec<Spec>,
+    references: AssetReferences,
 }
 
 impl Spec {
+    pub(crate) fn to_xml(&self) -> String {
+        fn escape(value: &str) -> String {
+            value
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('"', "&quot;")
+                .replace('\r', "&#13;")
+                .replace('\n', "&#10;")
+                .replace('\t', "&#9;")
+        }
+        let mut output = format!("<{}", self.tag);
+        for (name, value) in &self.attributes {
+            output.push_str(&format!(" {name}=\"{}\"", escape(value)));
+        }
+        output.push('>');
+        output.push_str(&escape(&self.text));
+        for (key, reference) in &self.references {
+            let kind = match reference.kind() {
+                crate::assets::AssetKind::Prefab => "prefab",
+                crate::assets::AssetKind::Ui => "ui",
+                crate::assets::AssetKind::Data => "data",
+            };
+            output.push_str(&format!(
+                "<Reference key=\"{}\" type=\"{kind}\" path=\"{}\"/>",
+                escape(key),
+                escape(reference.path())
+            ));
+        }
+        for child in &self.children {
+            output.push_str(&child.to_xml());
+        }
+        output.push_str(&format!("</{}>", self.tag));
+        output
+    }
+
     fn into_element(self) -> Result<(Box<dyn Element>, Vec<Spec>)> {
         let mut attributes = self.attributes;
         if matches!(self.tag.as_str(), "Label" | "Button") {
@@ -378,10 +433,23 @@ impl Spec {
     }
 }
 
-fn load_spec(path: &Path, stack: &mut Vec<PathBuf>) -> Result<Spec> {
+pub(crate) fn load_spec(
+    path: &Path,
+    stack: &mut Vec<PathBuf>,
+    resolver: &ReferenceResolver<'_>,
+) -> Result<Spec> {
     let path = path
         .canonicalize()
         .with_context(|| format!("failed to resolve UI document {}", path.display()))?;
+    if let Some(context) = crate::assets::asset_ref::active_context()
+        && !path.starts_with(&context.root)
+    {
+        bail!(
+            "UI document {} is outside the asset directory {}",
+            path.display(),
+            context.root.display()
+        );
+    }
     if stack.contains(&path) {
         let mut chain = stack
             .iter()
@@ -394,14 +462,19 @@ fn load_spec(path: &Path, stack: &mut Vec<PathBuf>) -> Result<Spec> {
     let result = (|| {
         let source = fs::read_to_string(&path)
             .with_context(|| format!("failed to read UI document {}", path.display()))?;
-        parse_spec(&source, path.parent(), stack)
+        parse_spec(&source, path.parent(), stack, resolver)
             .with_context(|| format!("invalid UI document {}", path.display()))
     })();
     stack.pop();
     result
 }
 
-fn parse_spec(source: &str, base: Option<&Path>, stack: &mut Vec<PathBuf>) -> Result<Spec> {
+fn parse_spec(
+    source: &str,
+    base: Option<&Path>,
+    stack: &mut Vec<PathBuf>,
+    resolver: &ReferenceResolver<'_>,
+) -> Result<Spec> {
     let xml = roxmltree::Document::parse(source).context("failed to parse UI XML")?;
     fn add_attribute(
         attributes: &mut BTreeMap<String, String>,
@@ -417,10 +490,31 @@ fn parse_spec(source: &str, base: Option<&Path>, stack: &mut Vec<PathBuf>) -> Re
         attributes.insert(attribute.name().to_owned(), attribute.value().to_owned());
         Ok(())
     }
+    fn resolve_template(
+        tag: &str,
+        attributes: &mut BTreeMap<String, String>,
+        resolver: &ReferenceResolver<'_>,
+    ) -> Result<()> {
+        if matches!(tag, "List" | "Table")
+            && let Some(template) = attributes.get("template")
+        {
+            let path = crate::assets::AssetKind::from_path(Path::new(template)).is_some()
+                || template.contains(['/', '\\']);
+            let source = AssetSource {
+                kind: crate::assets::AssetKind::Ui,
+                path: path.then(|| template.clone()),
+                name: (!path).then(|| template.clone()),
+            };
+            let reference = resolver(&source)?;
+            attributes.insert("template".into(), reference.path().to_owned());
+        }
+        Ok(())
+    }
     fn parse_node(
         node: roxmltree::Node<'_, '_>,
         base: Option<&Path>,
         stack: &mut Vec<PathBuf>,
+        resolver: &ReferenceResolver<'_>,
     ) -> Result<Spec> {
         if node.tag_name().namespace().is_some() {
             bail!("XML namespaces are not supported for UI elements");
@@ -439,24 +533,52 @@ fn parse_spec(source: &str, base: Option<&Path>, stack: &mut Vec<PathBuf>) -> Re
                 bail!("Include cannot contain children");
             }
             let base = base.ok_or_else(|| anyhow!("Include requires a document path"))?;
-            let mut spec = load_spec(&base.join(src), stack)?;
+            let mut spec = load_spec(&base.join(src), stack, resolver)?;
             for attribute in node
                 .attributes()
                 .filter(|attribute| attribute.namespace().is_some() || attribute.name() != "src")
             {
                 add_attribute(&mut spec.attributes, attribute)?;
             }
+            resolve_template(&spec.tag, &mut spec.attributes, resolver)?;
             return Ok(spec);
         }
         let mut attributes = BTreeMap::new();
         for attribute in node.attributes() {
             add_attribute(&mut attributes, attribute)?;
         }
+        resolve_template(node.tag_name().name(), &mut attributes, resolver)?;
         let mut children = Vec::new();
+        let mut references = AssetReferences::new();
         let mut text = String::new();
         for child in node.children() {
             if child.is_element() {
-                children.push(parse_node(child, base, stack)?);
+                if child.tag_name().name() == "Reference" {
+                    if child.tag_name().namespace().is_some() {
+                        bail!("XML namespaces are not supported for UI elements");
+                    }
+                    if child.children().any(|node| {
+                        node.is_element()
+                            || node.is_text() && !node.text().unwrap_or("").trim().is_empty()
+                    }) {
+                        bail!("Reference cannot contain children");
+                    }
+                    let mut attributes = BTreeMap::new();
+                    for attribute in child.attributes() {
+                        add_attribute(&mut attributes, attribute)?;
+                    }
+                    let key = attributes
+                        .remove("key")
+                        .filter(|key| !key.trim().is_empty())
+                        .ok_or_else(|| anyhow!("Reference requires a non-empty key"))?;
+                    let source: AssetSource =
+                        serde_yaml::from_value(serde_yaml::to_value(attributes)?)?;
+                    if references.insert(key.clone(), resolver(&source)?).is_some() {
+                        bail!("duplicate UI reference key '{key}'");
+                    }
+                } else {
+                    children.push(parse_node(child, base, stack, resolver)?);
+                }
             } else if child.is_text() {
                 text.push_str(child.text().unwrap_or(""));
             }
@@ -466,7 +588,12 @@ fn parse_spec(source: &str, base: Option<&Path>, stack: &mut Vec<PathBuf>) -> Re
             attributes,
             text,
             children,
+            references,
         })
     }
-    parse_node(xml.root_element(), base, stack)
+    parse_node(xml.root_element(), base, stack, resolver)
+}
+
+fn resolve_reference(source: &AssetSource) -> Result<AssetReference> {
+    crate::assets::asset_ref::current_context()?.resolve(source)
 }

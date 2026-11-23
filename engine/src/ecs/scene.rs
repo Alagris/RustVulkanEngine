@@ -582,6 +582,9 @@ fn build_game_object(
         },
         Vec::new(),
     );
+    object.borrow_mut().references =
+        serde_yaml::from_value(serde_yaml::to_value(definition.references)?)
+            .context("Failed to resolve game object asset references")?;
     for component_definition in definition.components {
         let mut component =
             registry.create(&component_definition.type_name, &component_definition.data)?;

@@ -1,7 +1,9 @@
 //! Integration tests driving the editor against the spoofed asset folders in
 //! `tests/resources` through the `editor::testing` framework.
 
-use editor::testing::{AssetDir, ProjectDir, assert_error_contains, project_error_at, scan_error_at};
+use editor::testing::{
+    AssetDir, ProjectDir, assert_error_contains, project_error_at, scan_error_at,
+};
 use editor::{AssetRef, AssetType, RuntimeSettings};
 use engine::data::animation_clip::AnimationClip;
 use engine::ecs::{ComponentRegistry, Scene};
@@ -105,7 +107,7 @@ fn basic_project_packages_a_release_directory() {
 
     assert!(output.path("data/data/controls.data").is_file());
     assert!(output.path("data/data/clips/wave.data").is_file());
-    assert_eq!(runtime.input_asset.as_deref(), Some("Controls"));
+    assert_eq!(runtime.input_asset.as_deref(), Some("data/controls.data"));
 }
 
 #[test]
@@ -270,11 +272,14 @@ fn scan_rejects_scenes_referencing_unknown_prefabs() {
 }
 
 #[test]
-fn scan_rejects_duplicate_asset_names_of_the_same_type() {
-    let error = AssetDir::fixture("invalid/duplicate_scenes").scan_error();
+fn duplicate_scene_names_require_path_resolution() {
+    let database = AssetDir::fixture("invalid/duplicate_scenes").scan_or_panic();
     assert!(
-        error.contains("duplicate Scene asset name 'world'"),
-        "unexpected error: {error}"
+        database
+            .resolve(&reference("world", AssetType::Scene))
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguous Scene")
     );
 }
 

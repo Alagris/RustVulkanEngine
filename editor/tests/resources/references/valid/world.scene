@@ -1,0 +1,18 @@
+root:
+  name: World
+  references:
+    layer: {asset: {type: data, path: layers/ground.data}}
+  children:
+    - prefab: main
+    - name: NestedTerrain
+      components:
+        - type: Terrain
+          data:
+            layer:
+              type: TerrainLayer
+              data: {label: Nested layer}
+    - name: SnowTerrain
+      components:
+        - type: Terrain
+          data:
+            layer: {ref: layers/snow.data}

@@ -10,5 +10,4 @@ pub struct ElementData<S: UiStyle = Style> {
     pub class: Option<String>,
     #[serde(default, deserialize_with = "deserialize_style_attribute")]
     pub style: S,
-   
 }

@@ -1,0 +1,13 @@
+root:
+  name: ExplicitPaths
+  references:
+    ui: {asset: {type: ui, path: ui/palette.ui}}
+  components:
+    - type: Foliage
+      data:
+        prefabs:
+          - {asset: {type: prefab, path: plants/pine.prefab}}
+          - {asset: {type: prefab, path: variants/pine.prefab}}
+    - type: Terrain
+      data:
+        layer: {ref: variants/ground.data}

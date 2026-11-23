@@ -1,7 +1,7 @@
 //! UI document and stylesheet processing, independent of rendering.
 
 pub mod css;
-mod document;
+pub(crate) mod document;
 pub mod elem;
 mod selector;
 

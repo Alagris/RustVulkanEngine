@@ -1,0 +1,4 @@
+type: TerrainLayer
+name: Base
+data:
+  label: Base layer

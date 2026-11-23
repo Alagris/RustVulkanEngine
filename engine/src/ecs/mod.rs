@@ -7,6 +7,7 @@ pub mod character_controller;
 pub mod collider;
 pub mod component;
 pub mod directional_light;
+pub mod foliage;
 pub mod game_object;
 mod game_object_serde;
 pub mod instanced_mesh;
@@ -18,6 +19,7 @@ pub mod scene;
 mod scene_serde;
 pub mod skinned_mesh;
 pub mod sphere_collider;
+pub mod terrain;
 mod weak_component_list;
 
 pub use crate::anim::AnimationClip;
@@ -38,6 +40,7 @@ pub use component::{
 };
 pub use component_macros::{Component, component};
 pub use directional_light::DirectionalLight;
+pub use foliage::Foliage;
 pub use game_object::{GameObject, GameObjectWeak};
 pub use game_object_serde::TransformDefinition;
 pub use instanced_mesh::InstancedMesh;
@@ -47,3 +50,4 @@ pub use procedural_mesh::ProceduralMesh;
 pub use scene::Scene;
 pub use skinned_mesh::{Bone, SkinnedMesh};
 pub use sphere_collider::SphereCollider;
+pub use terrain::Terrain;

@@ -1,0 +1,3 @@
+parent: plants/pine.prefab
+root:
+  name: SnowPine

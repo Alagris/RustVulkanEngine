@@ -1,0 +1,5 @@
+type: TerrainLayer
+name: Snow
+parent: layers/base.data
+data:
+  label: Snow

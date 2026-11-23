@@ -1,0 +1,6 @@
+root:
+  name: WrongLayer
+  components:
+    - type: Terrain
+      data:
+        layer: {ref: clip.data, type: AnimationClip}

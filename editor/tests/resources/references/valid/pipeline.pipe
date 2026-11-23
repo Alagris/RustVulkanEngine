@@ -1,0 +1,7 @@
+passes:
+  - name: Forest
+    material: materials/forest.mat
+    shader_pass: Forward
+  - name: Snow
+    material: variants/forest.mat
+    shader_pass: Forward

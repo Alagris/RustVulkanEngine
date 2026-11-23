@@ -1,0 +1,5 @@
+<Overlay id="row">
+    <Reference key="owner" type="ui" path="ui/palette.ui"/>
+    <Reference key="tree" type="prefab" path="plants/oak.prefab"/>
+    <Label id="caption">Foliage row</Label>
+</Overlay>

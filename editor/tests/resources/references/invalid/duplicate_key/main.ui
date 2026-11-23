@@ -1,0 +1,4 @@
+<Canvas>
+    <Reference key="same" type="ui" path="main.ui"/>
+    <Reference key="same" type="ui" path="main.ui"/>
+</Canvas>
